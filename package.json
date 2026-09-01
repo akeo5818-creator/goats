@@ -1,0 +1,18 @@
+{
+  "name": "bloxy-moderation-bot",
+  "version": "1.6.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Discord moderation bot with lockdowns, scheduled chat baptism, censor/link filters, ban tools, alt-risk alerts, staff DM tools, incoming DM logging, V2 components, and moderation logs.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "check": "node --check src/index.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  }
+}
