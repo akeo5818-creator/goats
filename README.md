@@ -12,7 +12,7 @@ Standalone Discord.js moderation/security bot for the configured Bloxy server.
 - `/baptize` manually runs the same full clear.
 - After every baptism the bot sends plain text exactly:
   `Chat has been baptized once again <:ThumbsupTom:1537715616369217567>`
-- Persistent warning history.
+- Persistent warning history, including automatic censor warnings with a 60-second per-user warning cooldown.
 - Persistent temporary bans with automatic expiry after bot restarts.
 - Server-wide custom censor list.
 - Discord links are automatically deleted from every channel/thread in category `1537689865267974192`.
@@ -56,6 +56,22 @@ Standalone Discord.js moderation/security bot for the configured Bloxy server.
 - Sticker-only and attachment-only DMs are logged even when there is no message text.
 - Set `DM_LOG_CHANNEL_ID` in `.env` to change the destination.
 
+### Server info / analytics
+- `/roleinfo role` - role mention, **copyable role ID code**, member count, position, color, creation time and permissions.
+- `/memberinfo [member]` - username/display name, user ID, account creation, server join time, roles and timeout state. Staff with Moderate Members also see saved warning count.
+- `/serverinfo` - server ID, owner, creation time, members, channels, roles, emojis, stickers and boosts.
+- `/serverstats` - current humans/bots plus joins, leaves and net growth for 24 hours, 7 days and 30 days.
+- `/servergraph [range]` - actual PNG bar graph for 7, 14 or 30 days of recorded joins vs leaves.
+- `/channelinfo [channel]` - channel ID, type, parent/category, creation time, slowmode, NSFW state and topic.
+- `/avatar [member]` - full-size avatar in a V2 media gallery.
+- `/servericon` - full-size server icon.
+- `/permissions [member]` - effective server permissions.
+- `/rolelist` - server roles with IDs.
+- `/ping` - gateway latency and uptime.
+- `/botinfo` - bot ID, version, uptime, command count and configured server.
+
+Join/leave analytics begin when v1.8 first starts; Discord does not provide historical leave events retroactively. Activity is stored in `data/state.json`. On Railway, mount persistent storage to the bot's `data` directory if you want graphs/warnings/state to survive redeployments.
+
 ### Staff DMs
 - `/talk message [user] [channel]` - sends plain text through the bot. If `user` is selected it DMs that user; otherwise it sends to `channel`, or defaults to the channel where the command was run. Requires Moderate Members.
 - `/dmall message [role]` - sends the exact plain-text message to every non-bot member, or only non-bot members with the selected role. Reports delivered/failed counts and logs the broadcast. Administrator-only.
@@ -67,9 +83,9 @@ Members with closed DMs are counted as failed deliveries rather than stopping th
 - `/censorremove word [reason]`
 - `/censorlist`
 
-Censor matching is case-insensitive and normalizes common leetspeak. Longer single words also catch simple punctuation/spacing bypasses such as `w.o.r.d`.
+Censor matching is case-insensitive and normalizes common leetspeak. Longer single words also catch simple punctuation/spacing bypasses such as `w.o.r.d`. Every censor hit deletes the message and automatically adds a warning, with a 60-second per-user warning cooldown to prevent instant warning spam.
 
-Members with `Administrator` or `Manage Messages` bypass the censor and category Discord-link filter so staff can moderate normally.
+The censor applies to every non-bot member, including staff/admins. Staff with `Administrator` or `Manage Messages` only bypass the category Discord-link filter.
 
 ### Alt-risk checks
 - `/altcheck member`
@@ -128,11 +144,15 @@ For lockdowns, ensure the bot can edit the Customer role permission overwrites. 
 
 ## Persistence
 
-`data/state.json` is created automatically and stores warnings, censored terms, temporary bans, recent alt-risk data, category lockdown snapshots, channel lock snapshots, and the next scheduled baptism. Keep this file on persistent storage when hosting the bot so restarts do not lose state.
+`data/state.json` is created automatically and stores warnings, censor-warning cooldowns, censored terms, temporary bans, recent alt-risk data, join/leave analytics, category lockdown snapshots, channel lock snapshots, and the next scheduled baptism. Keep this file on persistent storage when hosting the bot so restarts/redeployments do not lose state. For Railway, mount a Volume to the service `data` directory.
 
 ## Moderation DMs
 
 Punitive moderation commands attempt to DM the affected user a clean Components V2 **Moderation Notice** with no accent stripe. The notice includes the action, reason, and duration/expiry when relevant. The moderator is intentionally not shown to the affected user. Ban, temporary-ban, kick, and softban notices are attempted **before** removing the user from the server. Timeout, warning, and timeout-removal notices are also supported.
 
 All bot V2 containers intentionally have **no accent color**, so Discord does not show a colored strip on the left side.
-# goats
+
+
+## Censor behavior
+
+`/censoradd` accepts multiple words at once. Each space/comma-separated censor entry becomes its own trigger word. If any trigger appears in a non-bot message anywhere in the server, the whole message is deleted. Existing older multi-word censor entries are automatically split into individual trigger words when state is loaded.

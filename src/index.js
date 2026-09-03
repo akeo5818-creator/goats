@@ -1,4 +1,5 @@
 import {
+  AttachmentBuilder,
   ChannelType,
   Client,
   ContainerBuilder,
@@ -16,6 +17,7 @@ import {
 } from 'discord.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -46,11 +48,11 @@ const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
 
 if (!CONFIG.token) {
-  console.error('[CONFIG] Missing BOT_TOKEN in .env');
+  console.error('[CONFIG] Missing BOT_TOKEN environment variable.');
   process.exit(1);
 }
 if (!CONFIG.customerRoleId) {
-  console.error('[CONFIG] Missing CUSTOMER_ROLE_ID in .env');
+  console.error('[CONFIG] Missing CUSTOMER_ROLE_ID environment variable.');
   process.exit(1);
 }
 
@@ -191,20 +193,20 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('censorlist')
-    .setDescription('List every word or phrase currently blocked by the censor.')
+    .setDescription('List every trigger word currently blocked by the censor.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
   new SlashCommandBuilder()
     .setName('censoradd')
-    .setDescription('Add a word or phrase to the server-wide censor.')
-    .addStringOption(o => o.setName('word').setDescription('Word or phrase to block.').setRequired(true).setMinLength(1).setMaxLength(100))
+    .setDescription('Add one or more trigger words to the server-wide censor.')
+    .addStringOption(o => o.setName('word').setDescription('Words to block, separated by spaces or commas.').setRequired(true).setMinLength(1).setMaxLength(500))
     .addStringOption(o => o.setName('reason').setDescription('Reason for adding it.').setMaxLength(500))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
   new SlashCommandBuilder()
     .setName('censorremove')
-    .setDescription('Remove a word or phrase from the server-wide censor.')
-    .addStringOption(o => o.setName('word').setDescription('Word or phrase to remove.').setRequired(true).setMinLength(1).setMaxLength(100))
+    .setDescription('Remove one or more trigger words from the server-wide censor.')
+    .addStringOption(o => o.setName('word').setDescription('Words to remove, separated by spaces or commas.').setRequired(true).setMinLength(1).setMaxLength(500))
     .addStringOption(o => o.setName('reason').setDescription('Reason for removing it.').setMaxLength(500))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
@@ -245,6 +247,67 @@ const commands = [
       .setDescription('Optional channel to send to. Defaults to the current channel.')
       .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.PublicThread, ChannelType.PrivateThread))
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('roleinfo')
+    .setDescription('Show detailed information about a server role.')
+    .addRoleOption(o => o.setName('role').setDescription('Role to inspect.').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('memberinfo')
+    .setDescription('Show detailed information about a server member.')
+    .addUserOption(o => o.setName('member').setDescription('Member to inspect. Defaults to yourself.')),
+
+  new SlashCommandBuilder()
+    .setName('serverinfo')
+    .setDescription('Show detailed information about this server.'),
+
+  new SlashCommandBuilder()
+    .setName('serverstats')
+    .setDescription('Show live server totals and recorded join/leave statistics.'),
+
+  new SlashCommandBuilder()
+    .setName('servergraph')
+    .setDescription('Generate a joins vs leaves graph from recorded server activity.')
+    .addStringOption(o => o
+      .setName('range')
+      .setDescription('How many days to graph. Defaults to 7 days.')
+      .addChoices(
+        { name: '7 days', value: '7d' },
+        { name: '14 days', value: '14d' },
+        { name: '30 days', value: '30d' },
+      )),
+
+  new SlashCommandBuilder()
+    .setName('channelinfo')
+    .setDescription('Show detailed information about a channel.')
+    .addChannelOption(o => o.setName('channel').setDescription('Channel to inspect. Defaults to this channel.')),
+
+  new SlashCommandBuilder()
+    .setName('avatar')
+    .setDescription('Show a member avatar in full size.')
+    .addUserOption(o => o.setName('member').setDescription('Member whose avatar to show. Defaults to yourself.')),
+
+  new SlashCommandBuilder()
+    .setName('permissions')
+    .setDescription("Show a member's effective server permissions.")
+    .addUserOption(o => o.setName('member').setDescription('Member to inspect. Defaults to yourself.')),
+
+  new SlashCommandBuilder()
+    .setName('rolelist')
+    .setDescription('List the server roles and their IDs.'),
+
+  new SlashCommandBuilder()
+    .setName('servericon')
+    .setDescription('Show the server icon in full size.'),
+
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Show the bot gateway latency and uptime.'),
+
+  new SlashCommandBuilder()
+    .setName('botinfo')
+    .setDescription('Show information and uptime for this moderation bot.'),
 
   new SlashCommandBuilder()
     .setName('dmall')
@@ -317,11 +380,21 @@ client.on('messageUpdate', async (_oldMessage, newMessage) => {
 client.on('guildMemberAdd', async member => {
   if (member.guild.id !== CONFIG.guildId || member.user.bot) return;
   try {
+    registerMemberActivity('join', member.id);
     registerJoin(member);
     const assessment = evaluateAltRisk(member);
     if (assessment.score >= 25) await sendAltRiskLog(member, assessment, assessment.score >= CONFIG.altAlertThreshold);
   } catch (error) {
     console.error('[ALT] Join assessment failed:', error);
+  }
+});
+
+client.on('guildMemberRemove', member => {
+  if (member.guild.id !== CONFIG.guildId || member.user?.bot) return;
+  try {
+    registerMemberActivity('leave', member.id);
+  } catch (error) {
+    console.error('[ANALYTICS] Failed to record member leave:', error);
   }
 });
 
@@ -374,6 +447,18 @@ client.on('interactionCreate', async interaction => {
       case 'unlockchannel': return handleUnlockChannel(interaction);
       case 'nick': return handleNick(interaction);
       case 'talk': return handleTalk(interaction);
+      case 'roleinfo': return handleRoleInfo(interaction);
+      case 'memberinfo': return handleMemberInfo(interaction);
+      case 'serverinfo': return handleServerInfo(interaction);
+      case 'serverstats': return handleServerStats(interaction);
+      case 'servergraph': return handleServerGraph(interaction);
+      case 'channelinfo': return handleChannelInfo(interaction);
+      case 'avatar': return handleAvatar(interaction);
+      case 'permissions': return handlePermissions(interaction);
+      case 'rolelist': return handleRoleList(interaction);
+      case 'servericon': return handleServerIcon(interaction);
+      case 'ping': return handlePing(interaction);
+      case 'botinfo': return handleBotInfo(interaction);
       case 'dmall': return handleDmAll(interaction);
       default: return;
     }
@@ -878,31 +963,61 @@ async function handleCensorList(interaction) {
 async function handleCensorAdd(interaction) {
   if (!(await requirePermission(interaction, PermissionFlagsBits.ManageMessages))) return;
   const raw = interaction.options.getString('word', true).trim();
-  const reason = interaction.options.getString('reason') || 'Censor term added';
-  if (!raw) return fail(interaction, 'Invalid Censor', 'Enter a word or phrase to block.');
-  const key = normalizeCensorTerm(raw);
-  if (!key) return fail(interaction, 'Invalid Censor', 'That censor entry does not contain enough usable text.');
-  const existing = (state.censoredTerms || []).find(term => normalizeCensorTerm(term) === key);
-  if (existing) return fail(interaction, 'Already Censored', `\`${escapeCode(existing)}\` is already on the censor list.`);
+  const reason = interaction.options.getString('reason') || 'Censor trigger added';
+  const requested = parseCensorWords(raw);
+  if (!requested.length) return fail(interaction, 'Invalid Censor', 'Enter at least one usable trigger word.');
 
-  state.censoredTerms.push(raw);
-  state.censoredTerms.sort((a, b) => a.localeCompare(b));
-  saveState();
-  await logAction({ title: 'Censor Added', description: `Added \`${escapeCode(raw)}\` to the server-wide censor.`, moderator: interaction.user, reason, accentColor: 0x5865F2 });
-  return interaction.reply(v2Payload({ title: 'Censor Added', description: `\`${escapeCode(raw)}\` is now blocked server-wide.`, accentColor: 0x57F287, ephemeral: true }));
+  const existingKeys = new Set((state.censoredTerms || []).map(normalizeCensorTerm).filter(Boolean));
+  const added = [];
+  const already = [];
+  for (const word of requested) {
+    const key = normalizeCensorTerm(word);
+    if (existingKeys.has(key)) {
+      already.push(word);
+      continue;
+    }
+    state.censoredTerms.push(word);
+    existingKeys.add(key);
+    added.push(word);
+  }
+
+  state.censoredTerms = normalizeStoredCensorTerms(state.censoredTerms);
+  if (added.length) saveState();
+
+  if (!added.length) {
+    return fail(interaction, 'Already Censored', `All of those trigger words are already blocked: ${already.map(w => `\`${escapeCode(w)}\``).join(', ')}`);
+  }
+
+  const addedText = added.map(w => `\`${escapeCode(w)}\``).join(', ');
+  const skippedText = already.length ? `\n\nAlready blocked: ${already.map(w => `\`${escapeCode(w)}\``).join(', ')}` : '';
+  await logAction({ title: 'Censor Added', description: `Added ${addedText} to the server-wide censor.`, moderator: interaction.user, reason, accentColor: 0x5865F2 });
+  return interaction.reply(v2Payload({ title: 'Censor Added', description: `Now blocking **${added.length}** trigger word${added.length === 1 ? '' : 's'} server-wide:\n${added.map(w => `- \`${escapeCode(w)}\``).join('\n')}${skippedText}`, accentColor: 0x57F287, ephemeral: true }));
 }
 
 async function handleCensorRemove(interaction) {
   if (!(await requirePermission(interaction, PermissionFlagsBits.ManageMessages))) return;
   const raw = interaction.options.getString('word', true).trim();
-  const reason = interaction.options.getString('reason') || 'Censor term removed';
-  const key = normalizeCensorTerm(raw);
-  const index = (state.censoredTerms || []).findIndex(term => normalizeCensorTerm(term) === key);
-  if (index === -1) return fail(interaction, 'Not Censored', `\`${escapeCode(raw)}\` is not currently on the censor list.`);
-  const [removed] = state.censoredTerms.splice(index, 1);
+  const reason = interaction.options.getString('reason') || 'Censor trigger removed';
+  const requested = parseCensorWords(raw);
+  if (!requested.length) return fail(interaction, 'Invalid Censor', 'Enter at least one trigger word to remove.');
+
+  const removeKeys = new Set(requested.map(normalizeCensorTerm).filter(Boolean));
+  const removed = [];
+  const kept = [];
+  for (const term of state.censoredTerms || []) {
+    if (removeKeys.has(normalizeCensorTerm(term))) removed.push(term);
+    else kept.push(term);
+  }
+
+  if (!removed.length) return fail(interaction, 'Not Censored', 'None of those trigger words are currently on the censor list.');
+  state.censoredTerms = normalizeStoredCensorTerms(kept);
   saveState();
-  await logAction({ title: 'Censor Removed', description: `Removed \`${escapeCode(removed)}\` from the server-wide censor.`, moderator: interaction.user, reason, accentColor: 0x57F287 });
-  return interaction.reply(v2Payload({ title: 'Censor Removed', description: `\`${escapeCode(removed)}\` is no longer blocked.`, accentColor: 0x57F287, ephemeral: true }));
+
+  const removedKeys = new Set(removed.map(normalizeCensorTerm));
+  const notFound = requested.filter(w => !removedKeys.has(normalizeCensorTerm(w)));
+  const removedText = removed.map(w => `\`${escapeCode(w)}\``).join(', ');
+  await logAction({ title: 'Censor Removed', description: `Removed ${removedText} from the server-wide censor.`, moderator: interaction.user, reason, accentColor: 0x57F287 });
+  return interaction.reply(v2Payload({ title: 'Censor Removed', description: `Removed **${removed.length}** trigger word${removed.length === 1 ? '' : 's'}:\n${removed.map(w => `- \`${escapeCode(w)}\``).join('\n')}${notFound.length ? `\n\nNot found: ${notFound.map(w => `\`${escapeCode(w)}\``).join(', ')}` : ''}`, accentColor: 0x57F287, ephemeral: true }));
 }
 
 async function handleSlowmode(interaction) {
@@ -981,11 +1096,13 @@ async function moderateMessage(message) {
   if (!message.author || message.author.bot || !message.content) return;
   const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
   if (!member) return;
-  const channelPerms = message.channel?.permissionsFor?.(member);
-  if (member.permissions.has(PermissionFlagsBits.Administrator) || channelPerms?.has(PermissionFlagsBits.ManageMessages)) return;
 
+  // The censor applies to every non-bot member, including moderators/admins.
+  // Staff permissions only bypass the category Discord-link filter.
   const censorMatch = findCensorMatch(message.content);
-  const discordLink = channelIsInLockdownCategory(message.channel) && containsDiscordLink(message.content);
+  const channelPerms = message.channel?.permissionsFor?.(member);
+  const staffLinkBypass = member.permissions.has(PermissionFlagsBits.Administrator) || channelPerms?.has(PermissionFlagsBits.ManageMessages);
+  const discordLink = !staffLinkBypass && channelIsInLockdownCategory(message.channel) && containsDiscordLink(message.content);
   if (!censorMatch && !discordLink) return;
 
   const reason = censorMatch ? `Censored word/phrase: ${censorMatch}` : 'Discord links are blocked in this category';
@@ -993,10 +1110,13 @@ async function moderateMessage(message) {
   const channelMention = `<#${message.channelId}>`;
   await message.delete().catch(() => {});
 
+  let autoWarning = null;
+  if (censorMatch) autoWarning = addAutoCensorWarning(message.author.id, censorMatch);
+
   await message.author.send(v2Payload({
     title: 'Message Removed',
     description: censorMatch
-      ? `Your message in **${message.guild.name}** was removed because it contained a censored word or phrase.\n\nBlocked entry: \`${escapeCode(censorMatch)}\``
+      ? `Your message in **${message.guild.name}** was removed because it contained a censored word or phrase.\n\nBlocked entry: \`${escapeCode(censorMatch)}\`${autoWarning?.added ? `\n\nA warning was added to your moderation history. You now have **${autoWarning.count}** warning(s).` : autoWarning?.cooldown ? '\n\nThe message was still removed, but another warning was not added because your censor-warning cooldown is active.' : ''}`
       : `Your message in **${message.guild.name}** was removed because Discord links are not allowed in that category.`,
     accentColor: 0xED4245,
   })).catch(() => {});
@@ -1007,7 +1127,7 @@ async function moderateMessage(message) {
     moderator: client.user,
     target: message.author,
     reason,
-    extra: `Message preview: ${truncate(escapeMassMentions(message.content), 450)}`,
+    extra: `Message preview: ${truncate(escapeMassMentions(message.content), 450)}${autoWarning?.added ? `\nAuto-warning added: ${autoWarning.count} total warning(s).` : autoWarning?.cooldown ? '\nAuto-warning skipped: 60-second censor warning cooldown active.' : ''}`,
     accentColor: 0xED4245,
   });
 }
@@ -1039,6 +1159,22 @@ function normalizeCensorTerm(value) {
   return normalizeCensorText(value).replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
 }
 
+function parseCensorWords(value) {
+  const pieces = String(value || '')
+    .split(/[\s,;|]+/g)
+    .map(piece => normalizeCensorTerm(piece))
+    .filter(Boolean)
+    .flatMap(piece => piece.split(' '))
+    .filter(Boolean);
+  return [...new Set(pieces)];
+}
+
+function normalizeStoredCensorTerms(terms) {
+  const all = [];
+  for (const term of Array.isArray(terms) ? terms : []) all.push(...parseCensorWords(term));
+  return [...new Set(all)].sort((a, b) => a.localeCompare(b));
+}
+
 function findCensorMatch(content) {
   const base = normalizeCensorText(content);
   const spaced = ` ${base.replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ')} `;
@@ -1053,6 +1189,206 @@ function findCensorMatch(content) {
     if (!term.includes(' ') && termCompact.length >= 4 && compact.includes(termCompact)) return original;
   }
   return null;
+}
+
+function registerMemberActivity(type, userId) {
+  if (!state.memberActivity || typeof state.memberActivity !== 'object') {
+    state.memberActivity = { trackingSince: Date.now(), events: [] };
+  }
+  if (!state.memberActivity.trackingSince) state.memberActivity.trackingSince = Date.now();
+  if (!Array.isArray(state.memberActivity.events)) state.memberActivity.events = [];
+  state.memberActivity.events.push({ type, userId, at: Date.now() });
+  const cutoff = Date.now() - 370 * 24 * 60 * 60 * 1000;
+  state.memberActivity.events = state.memberActivity.events.filter(e => e?.at >= cutoff && (e.type === 'join' || e.type === 'leave')).slice(-100000);
+  saveState();
+}
+
+function activityTotals(days) {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  let joins = 0;
+  let leaves = 0;
+  for (const event of state.memberActivity?.events || []) {
+    if (!event?.at || event.at < cutoff) continue;
+    if (event.type === 'join') joins++;
+    else if (event.type === 'leave') leaves++;
+  }
+  return { joins, leaves, net: joins - leaves };
+}
+
+function activityBuckets(days) {
+  const result = [];
+  const now = new Date();
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const lookup = new Map();
+  for (let i = days - 1; i >= 0; i--) {
+    const start = today - i * 24 * 60 * 60 * 1000;
+    const date = new Date(start);
+    const key = date.toISOString().slice(0, 10);
+    const label = date.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' });
+    const bucket = { key, label, start, joins: 0, leaves: 0 };
+    result.push(bucket);
+    lookup.set(key, bucket);
+  }
+  for (const event of state.memberActivity?.events || []) {
+    if (!event?.at) continue;
+    const key = new Date(event.at).toISOString().slice(0, 10);
+    const bucket = lookup.get(key);
+    if (!bucket) continue;
+    if (event.type === 'join') bucket.joins++;
+    else if (event.type === 'leave') bucket.leaves++;
+  }
+  return result;
+}
+
+function addAutoCensorWarning(userId, censorMatch) {
+  state.censorWarnCooldowns ||= {};
+  const now = Date.now();
+  const last = Number(state.censorWarnCooldowns[userId] || 0);
+  if (now - last < 60_000) return { added: false, cooldown: true, count: (state.warnings[userId] || []).length };
+
+  const warnings = state.warnings[userId] || [];
+  warnings.push({
+    id: makeId(),
+    reason: `Automated censor violation: ${censorMatch}`,
+    moderatorId: client.user?.id || 'SYSTEM',
+    createdAt: now,
+    automatic: true,
+  });
+  state.warnings[userId] = warnings;
+  state.censorWarnCooldowns[userId] = now;
+  saveState();
+  return { added: true, cooldown: false, count: warnings.length };
+}
+
+function yesNo(value) {
+  return value ? 'Yes' : 'No';
+}
+
+function formatSigned(value) {
+  return value > 0 ? `+${value}` : String(value);
+}
+
+function prettyPermission(value) {
+  return String(value)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/^./, c => c.toUpperCase());
+}
+
+function prettyChannelType(type) {
+  const names = {
+    [ChannelType.GuildText]: 'Text Channel',
+    [ChannelType.DM]: 'Direct Message',
+    [ChannelType.GuildVoice]: 'Voice Channel',
+    [ChannelType.GroupDM]: 'Group DM',
+    [ChannelType.GuildCategory]: 'Category',
+    [ChannelType.GuildAnnouncement]: 'Announcement Channel',
+    [ChannelType.AnnouncementThread]: 'Announcement Thread',
+    [ChannelType.PublicThread]: 'Public Thread',
+    [ChannelType.PrivateThread]: 'Private Thread',
+    [ChannelType.GuildStageVoice]: 'Stage Channel',
+    [ChannelType.GuildDirectory]: 'Directory',
+    [ChannelType.GuildForum]: 'Forum',
+    [ChannelType.GuildMedia]: 'Media Channel',
+  };
+  return names[type] || `Type ${type}`;
+}
+
+function formatDurationFriendly(ms) {
+  let seconds = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(seconds / 86400); seconds %= 86400;
+  const hours = Math.floor(seconds / 3600); seconds %= 3600;
+  const minutes = Math.floor(seconds / 60); seconds %= 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (minutes) parts.push(`${minutes}m`);
+  if (seconds || !parts.length) parts.push(`${seconds}s`);
+  return parts.join(' ');
+}
+
+function renderActivityGraphPng(buckets) {
+  const width = 1200;
+  const height = 560;
+  const pixels = Buffer.alloc(width * height * 4);
+  const bg = [35, 36, 40, 255];
+  for (let i = 0; i < width * height; i++) {
+    pixels[i * 4] = bg[0]; pixels[i * 4 + 1] = bg[1]; pixels[i * 4 + 2] = bg[2]; pixels[i * 4 + 3] = bg[3];
+  }
+  const setPixel = (x, y, color) => {
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const i = (y * width + x) * 4;
+    pixels[i] = color[0]; pixels[i + 1] = color[1]; pixels[i + 2] = color[2]; pixels[i + 3] = color[3] ?? 255;
+  };
+  const rect = (x, y, w, h, color) => {
+    const x0 = Math.max(0, Math.floor(x)); const x1 = Math.min(width, Math.ceil(x + w));
+    const y0 = Math.max(0, Math.floor(y)); const y1 = Math.min(height, Math.ceil(y + h));
+    for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) setPixel(xx, yy, color);
+  };
+  const margin = { left: 60, right: 35, top: 35, bottom: 45 };
+  const chartW = width - margin.left - margin.right;
+  const chartH = height - margin.top - margin.bottom;
+  const max = Math.max(1, ...buckets.flatMap(b => [b.joins, b.leaves]));
+  const grid = [82, 84, 92, 255];
+  for (let i = 0; i <= 5; i++) {
+    const y = margin.top + chartH * (i / 5);
+    rect(margin.left, y, chartW, 2, grid);
+  }
+  rect(margin.left, margin.top + chartH, chartW, 3, [120, 122, 130, 255]);
+  const groupW = chartW / Math.max(1, buckets.length);
+  const gap = Math.max(2, groupW * 0.12);
+  const barW = Math.max(2, (groupW - gap * 3) / 2);
+  const joinColor = [88, 101, 242, 255];
+  const leaveColor = [237, 66, 69, 255];
+  for (let i = 0; i < buckets.length; i++) {
+    const b = buckets[i];
+    const baseX = margin.left + i * groupW + gap;
+    const jh = (b.joins / max) * (chartH - 6);
+    const lh = (b.leaves / max) * (chartH - 6);
+    rect(baseX, margin.top + chartH - jh, barW, jh, joinColor);
+    rect(baseX + barW + gap, margin.top + chartH - lh, barW, lh, leaveColor);
+  }
+  // Small legend swatches in the top-left; the V2 text names the colors.
+  rect(margin.left, 10, 28, 12, joinColor);
+  rect(margin.left + 45, 10, 28, 12, leaveColor);
+  return encodeRgbaPng(width, height, pixels);
+}
+
+function encodeRgbaPng(width, height, rgba) {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  const stride = width * 4;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0;
+    rgba.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
+  }
+  const chunk = (type, data) => {
+    const typeBuf = Buffer.from(type, 'ascii');
+    const out = Buffer.alloc(12 + data.length);
+    out.writeUInt32BE(data.length, 0);
+    typeBuf.copy(out, 4);
+    data.copy(out, 8);
+    out.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])) >>> 0, 8 + data.length);
+    return out;
+  };
+  return Buffer.concat([
+    signature,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(raw, { level: 9 })),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let k = 0; k < 8; k++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 function registerJoin(member) {
@@ -1384,6 +1720,239 @@ async function handleTalk(interaction) {
     title: 'Message Sent',
     description: `Sent the message in ${channel}. ${EMOJIS.smileyTom}`,
     accentColor: 0x57F287,
+  }));
+}
+
+async function handleRoleInfo(interaction) {
+  const role = interaction.options.getRole('role', true);
+  await interaction.guild.members.fetch().catch(() => null);
+  const perms = role.permissions.toArray();
+  const created = Math.floor(role.createdTimestamp / 1000);
+  const color = role.color ? role.hexColor : 'Default';
+  const permissionText = perms.length ? truncate(perms.map(prettyPermission).join(', '), 1200) : 'None';
+
+  return interaction.reply(v2Payload({
+    title: `Role Info - ${role.name}`,
+    description:
+      `**Role**\n${role}\n\n` +
+      `**Role ID**\n\`\`\`${role.id}\`\`\`\n\n` +
+      `**Members**\n${role.members.size.toLocaleString()}\n\n` +
+      `**Position**\n${role.position}\n\n` +
+      `**Color**\n${color}\n\n` +
+      `**Hoisted**\n${yesNo(role.hoist)}\n\n` +
+      `**Mentionable**\n${yesNo(role.mentionable)}\n\n` +
+      `**Managed by Integration/Bot**\n${yesNo(role.managed)}\n\n` +
+      `**Created**\n<t:${created}:F> (<t:${created}:R>)\n\n` +
+      `**Permissions**\n${permissionText}`,
+  }));
+}
+
+async function handleMemberInfo(interaction) {
+  const user = interaction.options.getUser('member') || interaction.user;
+  const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+  if (!member) return fail(interaction, 'Member Not Found', 'That user is not currently in the server.');
+
+  const created = Math.floor(user.createdTimestamp / 1000);
+  const joined = member.joinedTimestamp ? Math.floor(member.joinedTimestamp / 1000) : null;
+  const roles = [...member.roles.cache.values()]
+    .filter(r => r.id !== interaction.guild.id)
+    .sort((a, b) => b.position - a.position);
+  const roleText = roles.length ? truncate(roles.map(r => `${r}`).join(' '), 1000) : 'No roles';
+  const timeout = member.communicationDisabledUntilTimestamp && member.communicationDisabledUntilTimestamp > Date.now()
+    ? `<t:${Math.floor(member.communicationDisabledUntilTimestamp / 1000)}:F> (<t:${Math.floor(member.communicationDisabledUntilTimestamp / 1000)}:R>)`
+    : 'No';
+  const staffCanSeeWarnings = interaction.member?.permissions?.has(PermissionFlagsBits.ModerateMembers) || interaction.member?.permissions?.has(PermissionFlagsBits.Administrator);
+  const warningText = staffCanSeeWarnings ? `\n\n**Warnings on Record**\n${(state.warnings[user.id] || []).length}` : '';
+
+  return interaction.reply(v2Payload({
+    title: `Member Info - ${member.displayName}`,
+    description:
+      `**User**\n${user}\n\n` +
+      `**Username**\n${escapeMassMentions(user.tag || user.username)}\n\n` +
+      `**Display Name**\n${escapeMassMentions(member.displayName)}\n\n` +
+      `**User ID**\n\`${user.id}\`\n\n` +
+      `**Account Created**\n<t:${created}:F> (<t:${created}:R>)\n\n` +
+      `**Joined Server**\n${joined ? `<t:${joined}:F> (<t:${joined}:R>)` : 'Unknown'}\n\n` +
+      `**Bot Account**\n${yesNo(user.bot)}\n\n` +
+      `**Timed Out**\n${timeout}\n\n` +
+      `**Roles (${roles.length})**\n${roleText}${warningText}`,
+  }));
+}
+
+async function handleServerInfo(interaction) {
+  const guild = interaction.guild;
+  const owner = await guild.fetchOwner().catch(() => null);
+  const created = Math.floor(guild.createdTimestamp / 1000);
+  const channels = guild.channels.cache;
+  const textChannels = channels.filter(ch => ch.type === ChannelType.GuildText || ch.type === ChannelType.GuildAnnouncement).size;
+  const voiceChannels = channels.filter(ch => ch.type === ChannelType.GuildVoice || ch.type === ChannelType.GuildStageVoice).size;
+  const categories = channels.filter(ch => ch.type === ChannelType.GuildCategory).size;
+
+  return interaction.reply(v2Payload({
+    title: `Server Info - ${guild.name}`,
+    description:
+      `**Server ID**\n\`${guild.id}\`\n\n` +
+      `**Owner**\n${owner ? `${owner} (\`${owner.id}\`)` : 'Unknown'}\n\n` +
+      `**Created**\n<t:${created}:F> (<t:${created}:R>)\n\n` +
+      `**Members**\n${guild.memberCount.toLocaleString()}\n\n` +
+      `**Roles**\n${guild.roles.cache.size.toLocaleString()}\n\n` +
+      `**Channels**\n${channels.size.toLocaleString()} total - ${textChannels} text - ${voiceChannels} voice - ${categories} categories\n\n` +
+      `**Emojis**\n${guild.emojis.cache.size.toLocaleString()}\n\n` +
+      `**Stickers**\n${guild.stickers.cache.size.toLocaleString()}\n\n` +
+      `**Boosts**\n${guild.premiumSubscriptionCount || 0} - Level ${guild.premiumTier}`,
+  }));
+}
+
+async function handleServerStats(interaction) {
+  const guild = interaction.guild;
+  const members = await guild.members.fetch();
+  const humans = members.filter(m => !m.user.bot).size;
+  const bots = members.filter(m => m.user.bot).size;
+  const stats24h = activityTotals(1);
+  const stats7d = activityTotals(7);
+  const stats30d = activityTotals(30);
+  const warningCount = Object.values(state.warnings || {}).reduce((sum, list) => sum + (Array.isArray(list) ? list.length : 0), 0);
+  const trackingSince = state.memberActivity?.trackingSince || Date.now();
+
+  return interaction.reply(v2Payload({
+    title: 'Server Stats',
+    description:
+      `**Current Members**\n${guild.memberCount.toLocaleString()}\n\n` +
+      `**Humans**\n${humans.toLocaleString()}\n\n` +
+      `**Bots**\n${bots.toLocaleString()}\n\n` +
+      `**Last 24 Hours**\n${stats24h.joins} joins - ${stats24h.leaves} leaves - Net ${formatSigned(stats24h.net)}\n\n` +
+      `**Last 7 Days**\n${stats7d.joins} joins - ${stats7d.leaves} leaves - Net ${formatSigned(stats7d.net)}\n\n` +
+      `**Last 30 Days**\n${stats30d.joins} joins - ${stats30d.leaves} leaves - Net ${formatSigned(stats30d.net)}\n\n` +
+      `**Warnings on Record**\n${warningCount.toLocaleString()}\n\n` +
+      `**Censor Triggers**\n${(state.censoredTerms || []).length.toLocaleString()}\n\n` +
+      `**Activity Tracking Started**\n<t:${Math.floor(trackingSince / 1000)}:F>`,
+  }));
+}
+
+async function handleServerGraph(interaction) {
+  const value = interaction.options.getString('range') || '7d';
+  const days = value === '30d' ? 30 : value === '14d' ? 14 : 7;
+  const buckets = activityBuckets(days);
+  const totals = buckets.reduce((acc, b) => ({ joins: acc.joins + b.joins, leaves: acc.leaves + b.leaves }), { joins: 0, leaves: 0 });
+  const png = renderActivityGraphPng(buckets);
+  const attachment = new AttachmentBuilder(png, { name: `server-growth-${days}d.png` });
+  const trackingSince = state.memberActivity?.trackingSince || Date.now();
+  const container = new ContainerBuilder()
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+      `# Server Growth - ${days} Days\n` +
+      `**Period:** ${buckets[0]?.label || 'Unknown'} - ${buckets.at(-1)?.label || 'Unknown'} (UTC)\n` +
+      `**Joins:** ${totals.joins}  •  **Leaves:** ${totals.leaves}  •  **Net:** ${formatSigned(totals.joins - totals.leaves)}\n\n` +
+      `Blue bars = joins  •  Red bars = leaves\n` +
+      `-# Activity is recorded by this bot from <t:${Math.floor(trackingSince / 1000)}:F> onward. Days are grouped in UTC.`
+    ));
+  const gallery = new MediaGalleryBuilder().addItems(
+    new MediaGalleryItemBuilder()
+      .setURL(`attachment://server-growth-${days}d.png`)
+      .setDescription(`${days}-day server joins vs leaves graph`)
+  );
+  container.addMediaGalleryComponents(gallery);
+
+  return interaction.reply({
+    components: [container],
+    files: [attachment],
+    flags: MessageFlags.IsComponentsV2,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function handleChannelInfo(interaction) {
+  const channel = interaction.options.getChannel('channel') || interaction.channel;
+  if (!channel || !('id' in channel)) return fail(interaction, 'Channel Not Found', 'I could not resolve that channel.');
+  const created = channel.createdTimestamp ? Math.floor(channel.createdTimestamp / 1000) : null;
+  const parent = channel.parentId ? `<#${channel.parentId}>` : 'None';
+  const topic = 'topic' in channel && channel.topic ? truncate(channel.topic, 900) : 'None';
+  const slowmode = 'rateLimitPerUser' in channel ? `${channel.rateLimitPerUser || 0} seconds` : 'Not applicable';
+
+  return interaction.reply(v2Payload({
+    title: `Channel Info - ${channel.name || channel.id}`,
+    description:
+      `**Channel**\n${channel}\n\n` +
+      `**Channel ID**\n\`${channel.id}\`\n\n` +
+      `**Type**\n${prettyChannelType(channel.type)}\n\n` +
+      `**Category / Parent**\n${parent}\n\n` +
+      `**Created**\n${created ? `<t:${created}:F> (<t:${created}:R>)` : 'Unknown'}\n\n` +
+      `**Slowmode**\n${slowmode}\n\n` +
+      `**NSFW**\n${'nsfw' in channel ? yesNo(channel.nsfw) : 'Not applicable'}\n\n` +
+      `**Topic**\n${escapeMassMentions(topic)}`,
+  }));
+}
+
+async function handleAvatar(interaction) {
+  const user = interaction.options.getUser('member') || interaction.user;
+  const url = user.displayAvatarURL({ extension: 'png', size: 4096, forceStatic: false });
+  const container = new ContainerBuilder()
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(`# Avatar - ${escapeMassMentions(user.username)}\n**User ID**\n\`${user.id}\``));
+  const gallery = new MediaGalleryBuilder().addItems(
+    new MediaGalleryItemBuilder().setURL(url).setDescription(`${user.username}'s avatar`)
+  );
+  container.addMediaGalleryComponents(gallery);
+  return interaction.reply({ components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
+}
+
+async function handlePermissions(interaction) {
+  const user = interaction.options.getUser('member') || interaction.user;
+  const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+  if (!member) return fail(interaction, 'Member Not Found', 'That user is not currently in the server.');
+  const perms = member.permissions.toArray();
+  const body = perms.length ? perms.map(prettyPermission).sort().join('\n') : 'No server permissions.';
+  return interaction.reply(v2Payload({
+    title: `Permissions - ${member.displayName}`,
+    description: `**User ID**\n\`${user.id}\`\n\n**Effective Server Permissions (${perms.length})**\n${truncate(body, 3000)}`,
+  }));
+}
+
+async function handleRoleList(interaction) {
+  const roles = [...interaction.guild.roles.cache.values()]
+    .filter(role => role.id !== interaction.guild.id)
+    .sort((a, b) => b.position - a.position);
+  const shown = roles.slice(0, 35);
+  const body = shown.length
+    ? shown.map((role, index) => `**${index + 1}.** ${role} - \`${role.id}\``).join('\n')
+    : 'No roles found.';
+  return interaction.reply(v2Payload({
+    title: `Role List - ${interaction.guild.name}`,
+    description: `${body}${roles.length > shown.length ? `\n\nShowing ${shown.length} of ${roles.length} roles.` : ''}`,
+  }));
+}
+
+async function handleServerIcon(interaction) {
+  const url = interaction.guild.iconURL({ extension: 'png', size: 4096, forceStatic: false });
+  if (!url) return fail(interaction, 'No Server Icon', 'This server does not currently have an icon.');
+  const container = new ContainerBuilder()
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(`# Server Icon - ${escapeMassMentions(interaction.guild.name)}\n**Server ID**\n\`${interaction.guild.id}\``));
+  container.addMediaGalleryComponents(new MediaGalleryBuilder().addItems(
+    new MediaGalleryItemBuilder().setURL(url).setDescription(`${interaction.guild.name} server icon`)
+  ));
+  return interaction.reply({ components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
+}
+
+async function handlePing(interaction) {
+  const latency = Math.max(0, Math.round(client.ws.ping));
+  return interaction.reply(v2Payload({
+    title: 'Bot Status',
+    description: `**Gateway Latency**\n${latency} ms\n\n**Uptime**\n${formatDurationFriendly(client.uptime || 0)}`,
+  }));
+}
+
+async function handleBotInfo(interaction) {
+  const uptime = client.uptime || 0;
+  const startedAt = Date.now() - uptime;
+  const guild = interaction.guild;
+  return interaction.reply(v2Payload({
+    title: 'Bot Info',
+    description:
+      `**Bot**\n${client.user}\n\n` +
+      `**Bot ID**\n\`${client.user.id}\`\n\n` +
+      `**Version**\n1.8.0\n\n` +
+      `**Uptime**\n${formatDurationFriendly(uptime)}\n\n` +
+      `**Online Since**\n<t:${Math.floor(startedAt / 1000)}:F> (<t:${Math.floor(startedAt / 1000)}:R>)\n\n` +
+      `**Registered Commands**\n${commands.length}\n\n` +
+      `**Server**\n${escapeMassMentions(guild.name)} (\`${guild.id}\`)`,
   }));
 }
 
@@ -1744,7 +2313,7 @@ function stripEphemeralFlag(payload) {
 
 function loadState() {
   const defaults = {
-    version: 2,
+    version: 4,
     nextBaptismAt: null,
     lockdown: { active: false, channels: {} },
     warnings: {},
@@ -1753,6 +2322,8 @@ function loadState() {
     tempBans: {},
     recentBans: [],
     recentJoins: [],
+    memberActivity: { trackingSince: Date.now(), events: [] },
+    censorWarnCooldowns: {},
   };
 
   if (!fs.existsSync(STATE_FILE)) return defaults;
@@ -1764,10 +2335,17 @@ function loadState() {
       ...parsed,
       warnings: parsed.warnings || {},
       channelLocks: parsed.channelLocks || {},
-      censoredTerms: Array.isArray(parsed.censoredTerms) ? parsed.censoredTerms : [],
+      censoredTerms: normalizeStoredCensorTerms(parsed.censoredTerms),
       tempBans: parsed.tempBans || {},
       recentBans: Array.isArray(parsed.recentBans) ? parsed.recentBans : [],
       recentJoins: Array.isArray(parsed.recentJoins) ? parsed.recentJoins : [],
+      memberActivity: parsed.memberActivity && typeof parsed.memberActivity === 'object'
+        ? {
+            trackingSince: parsed.memberActivity.trackingSince || Date.now(),
+            events: Array.isArray(parsed.memberActivity.events) ? parsed.memberActivity.events : [],
+          }
+        : defaults.memberActivity,
+      censorWarnCooldowns: parsed.censorWarnCooldowns && typeof parsed.censorWarnCooldowns === 'object' ? parsed.censorWarnCooldowns : {},
       lockdown: parsed.lockdown || defaults.lockdown,
     };
   } catch (error) {
