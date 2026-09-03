@@ -5,6 +5,7 @@ Standalone Discord.js moderation/security bot for the configured Bloxy server.
 ## Main systems
 
 - Components V2 responses and moderation logs.
+- Rotating Discord presence/status messages with no emojis.
 - `/lockdown` hides the configured category from the Customer role.
 - `/unlockdown` restores the exact Customer-role permission overwrites saved before lockdown.
 - New channels created in the category while lockdown is active are automatically hidden too.
@@ -70,13 +71,25 @@ Standalone Discord.js moderation/security bot for the configured Bloxy server.
 - `/ping` - gateway latency and uptime.
 - `/botinfo` - bot ID, version, uptime, command count and configured server.
 
-Join/leave analytics begin when v1.8 first starts; Discord does not provide historical leave events retroactively. Activity is stored in `data/state.json`. On Railway, mount persistent storage to the bot's `data` directory if you want graphs/warnings/state to survive redeployments.
+Join/leave analytics begin when v1.8+ first starts; Discord does not provide historical leave events retroactively. Activity is stored in `data/state.json`. On Railway, mount persistent storage to the bot's `data` directory if you want graphs/warnings/state to survive redeployments.
 
 ### Staff DMs
 - `/talk message [user] [channel]` - sends plain text through the bot. If `user` is selected it DMs that user; otherwise it sends to `channel`, or defaults to the channel where the command was run. Requires Moderate Members.
 - `/dmall message [role]` - sends the exact plain-text message to every non-bot member, or only non-bot members with the selected role. Reports delivered/failed counts and logs the broadcast. Administrator-only.
 
 Members with closed DMs are counted as failed deliveries rather than stopping the broadcast. The bot uses a small worker pool instead of launching every DM request at once.
+
+### Status rotator
+The bot rotates its Discord activity every 20 seconds. The included messages are:
+- `Watching over Bloxburg Store`
+- `Playing Keeping chat clean`
+- `Watching for suspicious accounts`
+- `Playing Protecting the community`
+- `Watching <member count> members`
+- `Playing Keeping things under control`
+- `Watching server activity`
+
+No emojis are used in the rotating statuses.
 
 ### Censor
 - `/censoradd word [reason]` - adds a word or phrase to the server-wide censor.

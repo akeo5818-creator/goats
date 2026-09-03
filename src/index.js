@@ -1,4 +1,5 @@
 import {
+  ActivityType,
   AttachmentBuilder,
   ChannelType,
   Client,
@@ -46,6 +47,17 @@ const EMOJIS = {
 const BAPTISM_TEXT = `Chat has been baptized once again ${EMOJIS.thumbsUpTom}`;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
+const STATUS_ROTATION_INTERVAL_MS = 20_000;
+
+const STATUS_ROTATION = [
+  { type: ActivityType.Watching, text: () => 'over Bloxburg Store' },
+  { type: ActivityType.Playing, text: () => 'Keeping chat clean' },
+  { type: ActivityType.Watching, text: () => 'for suspicious accounts' },
+  { type: ActivityType.Playing, text: () => 'Protecting the community' },
+  { type: ActivityType.Watching, text: guild => `${guild?.memberCount ?? 0} members` },
+  { type: ActivityType.Playing, text: () => 'Keeping things under control' },
+  { type: ActivityType.Watching, text: () => 'server activity' },
+];
 
 if (!CONFIG.token) {
   console.error('[CONFIG] Missing BOT_TOKEN environment variable.');
@@ -320,6 +332,8 @@ const commands = [
 client.once('ready', async () => {
   console.log(`[READY] Logged in as ${client.user.tag}`);
 
+  startStatusRotator();
+
   try {
     const rest = new REST({ version: '10' }).setToken(CONFIG.token);
     await rest.put(Routes.applicationGuildCommands(client.user.id, CONFIG.guildId), { body: commands });
@@ -340,6 +354,32 @@ client.once('ready', async () => {
   await checkBaptismSchedule();
   await checkTempBans();
 });
+
+function startStatusRotator() {
+  let index = 0;
+
+  const rotate = () => {
+    if (!client.user) return;
+    const guild = client.guilds.cache.get(CONFIG.guildId);
+    const status = STATUS_ROTATION[index % STATUS_ROTATION.length];
+    index += 1;
+
+    try {
+      client.user.setPresence({
+        status: 'online',
+        activities: [{
+          name: status.text(guild),
+          type: status.type,
+        }],
+      });
+    } catch (error) {
+      console.error('[STATUS] Failed to update rotating status:', error);
+    }
+  };
+
+  rotate();
+  setInterval(rotate, STATUS_ROTATION_INTERVAL_MS).unref();
+}
 
 client.on('channelCreate', async channel => {
   if (!state.lockdown?.active) return;
@@ -1948,7 +1988,7 @@ async function handleBotInfo(interaction) {
     description:
       `**Bot**\n${client.user}\n\n` +
       `**Bot ID**\n\`${client.user.id}\`\n\n` +
-      `**Version**\n1.8.0\n\n` +
+      `**Version**\n1.9.0\n\n` +
       `**Uptime**\n${formatDurationFriendly(uptime)}\n\n` +
       `**Online Since**\n<t:${Math.floor(startedAt / 1000)}:F> (<t:${Math.floor(startedAt / 1000)}:R>)\n\n` +
       `**Registered Commands**\n${commands.length}\n\n` +
