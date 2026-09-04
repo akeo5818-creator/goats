@@ -293,3 +293,12 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 - Support / claim buttons use `<:ticket:1540639436436406332>` as a real Discord custom component emoji.
 - Champion references use `<a:Trophy_fixed:1545550040628461588>` instead of the native crown emoji.
 - Existing SmileyTom round headers and the animated tournament trophy remain unchanged.
+
+
+## v2.9 custom emoji resolver
+
+- The configured ticket (`1540639436436406332`), giveaway (`1540636417577721927`) and Trophy_fixed (`1545550040628461588`) emojis are fetched from Discord by ID at startup.
+- V2 button emojis now use the fetched GuildEmoji's exact name/animated metadata instead of only a hard-coded component object.
+- Text displays build their custom-emoji markup from the fetched emoji metadata too.
+- `/emojicheck` shows whether the bot can actually access each configured emoji and which connected server owns it.
+- FAQ is rebuilt only after emoji resolution, so its support-ticket button uses the resolved custom ticket emoji immediately after startup.

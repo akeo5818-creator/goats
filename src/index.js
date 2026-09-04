@@ -72,16 +72,70 @@ const CHAMPION_ROLE_NAME = 'Champion';
 const TOURNAMENT_REGISTRATION_MINUTES = 10;
 const TOURNAMENT_TROPHY_ID = '1545550040628461588';
 const TOURNAMENT_TROPHY_NAME = 'Trophy_fixed';
-const TOURNAMENT_TROPHY = `<a:${TOURNAMENT_TROPHY_NAME}:${TOURNAMENT_TROPHY_ID}>`;
-const TOURNAMENT_TROPHY_COMPONENT = { id: TOURNAMENT_TROPHY_ID, name: TOURNAMENT_TROPHY_NAME, animated: true };
 const GIVEAWAY_EMOJI_ID = '1540636417577721927';
 const GIVEAWAY_EMOJI_NAME = 'giveaway';
-const GIVEAWAY_EMOJI = `<:${GIVEAWAY_EMOJI_NAME}:${GIVEAWAY_EMOJI_ID}>`;
-const GIVEAWAY_EMOJI_COMPONENT = { id: GIVEAWAY_EMOJI_ID, name: GIVEAWAY_EMOJI_NAME, animated: false };
 const TICKET_EMOJI_ID = '1540639436436406332';
 const TICKET_EMOJI_NAME = 'ticket';
-const TICKET_EMOJI = `<:${TICKET_EMOJI_NAME}:${TICKET_EMOJI_ID}>`;
-const TICKET_EMOJI_COMPONENT = { id: TICKET_EMOJI_ID, name: TICKET_EMOJI_NAME, animated: false };
+
+// Do not rely on hard-coded emoji markup/component objects alone. Discord can
+// silently fall back / fail to render a custom component emoji when the bot has
+// stale emoji metadata. We fetch each exact emoji ID at startup and use the
+// GuildEmoji's real name + animated flag everywhere (text AND buttons).
+const CUSTOM_EMOJI_SPECS = {
+  trophy: { id: TOURNAMENT_TROPHY_ID, name: TOURNAMENT_TROPHY_NAME, animated: true },
+  giveaway: { id: GIVEAWAY_EMOJI_ID, name: GIVEAWAY_EMOJI_NAME, animated: false },
+  ticket: { id: TICKET_EMOJI_ID, name: TICKET_EMOJI_NAME, animated: false },
+};
+const resolvedCustomEmojis = new Map();
+
+function customEmojiText(key) {
+  const emoji = resolvedCustomEmojis.get(key);
+  const spec = CUSTOM_EMOJI_SPECS[key];
+  if (emoji) return `<${emoji.animated ? 'a' : ''}:${emoji.name}:${emoji.id}>`;
+  return `<${spec.animated ? 'a' : ''}:${spec.name}:${spec.id}>`;
+}
+
+function customEmojiComponent(key) {
+  const emoji = resolvedCustomEmojis.get(key);
+  const spec = CUSTOM_EMOJI_SPECS[key];
+  return emoji
+    ? { id: emoji.id, name: emoji.name, animated: Boolean(emoji.animated) }
+    : { id: spec.id, name: spec.name, animated: Boolean(spec.animated) };
+}
+
+async function resolveConfiguredCustomEmojis() {
+  resolvedCustomEmojis.clear();
+
+  const guilds = [];
+  const primary = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId).catch(() => null);
+  if (primary) guilds.push(primary);
+  for (const guild of client.guilds.cache.values()) {
+    if (!guilds.some(g => g.id === guild.id)) guilds.push(guild);
+  }
+
+  for (const guild of guilds) {
+    const emojis = await guild.emojis.fetch().catch(error => {
+      console.warn(`[EMOJI] Could not fetch emojis from ${guild.name || guild.id}:`, error?.message || error);
+      return null;
+    });
+    if (!emojis) continue;
+
+    for (const [key, spec] of Object.entries(CUSTOM_EMOJI_SPECS)) {
+      if (resolvedCustomEmojis.has(key)) continue;
+      const emoji = emojis.get(spec.id);
+      if (emoji) resolvedCustomEmojis.set(key, emoji);
+    }
+  }
+
+  for (const [key, spec] of Object.entries(CUSTOM_EMOJI_SPECS)) {
+    const emoji = resolvedCustomEmojis.get(key);
+    if (emoji) {
+      console.log(`[EMOJI] ${key}: resolved ${emoji.toString()} from ${emoji.guild?.name || emoji.guild?.id || 'a connected guild'}`);
+    } else {
+      console.warn(`[EMOJI] ${key}: ID ${spec.id} was NOT found in any server this bot can access. Discord cannot render it as a bot custom emoji until the bot can access the emoji's server.`);
+    }
+  }
+}
 const TOURNAMENT_HISTORY_LIMIT = 50;
 const TOURNAMENT_TURN_MS = 30_000;
 const DISCORD_LINK_EXEMPT_CATEGORY_IDS = new Set([
@@ -488,6 +542,11 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
+    .setName('emojicheck')
+    .setDescription('Check whether the bot can access the configured custom emoji IDs.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('dmpollcreate')
     .setDescription('Create a saved DM poll draft.')
     .addStringOption(o => o.setName('name').setDescription('Short internal poll name.').setRequired(true).setMinLength(2).setMaxLength(40))
@@ -574,6 +633,11 @@ const commands = [
 
 client.once('ready', async () => {
   console.log(`[READY] Logged in as ${client.user.tag}`);
+
+  // Resolve the exact GuildEmoji objects before any V2 panels are rebuilt.
+  // This is what makes the ticket/giveaway/trophy render as the real custom
+  // server emoji instead of relying on stale hard-coded metadata.
+  await resolveConfiguredCustomEmojis();
 
   startStatusRotator();
 
@@ -872,6 +936,7 @@ client.on('interactionCreate', async interaction => {
       case 'faqremove': return handleFaqRemove(interaction);
       case 'faqlist': return handleFaqList(interaction);
       case 'faqrefresh': return handleFaqRefresh(interaction);
+      case 'emojicheck': return handleEmojiCheck(interaction);
       case 'dmpollcreate': return handleDmPollCreate(interaction);
       case 'dmquestion': return handleDmQuestion(interaction);
       case 'dmquestionremove': return handleDmQuestionRemove(interaction);
@@ -3649,7 +3714,7 @@ function makeTournamentRegistrationPayload(active) {
   const more = participants.length > 20 ? `\n...and ${participants.length - 20} more` : '';
   const container = new ContainerBuilder().addTextDisplayComponents(
     new TextDisplayBuilder().setContent(
-      `# ${TOURNAMENT_TROPHY} ${tournamentGameName(active.game)} Tournament\n` +
+      `# ${customEmojiText('trophy')} ${tournamentGameName(active.game)} Tournament\n` +
       `${tournamentGameEmoji(active.game)} **Registration is OPEN**\n\n` +
       `**Prize**\n${escapeMassMentions(active.prize)}\n\n` +
       `**Players Joined** ${participants.length}\n${names}${more}\n\n` +
@@ -3660,7 +3725,7 @@ function makeTournamentRegistrationPayload(active) {
     )
   );
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`tour:join:${active.id}`).setLabel('Join Tournament').setEmoji(TOURNAMENT_TROPHY_COMPONENT).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`tour:join:${active.id}`).setLabel('Join Tournament').setEmoji(customEmojiComponent('trophy')).setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`tour:leave:${active.id}`).setLabel('Leave Tournament').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setLabel('Prize Support').setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL),
   );
@@ -3688,7 +3753,7 @@ async function startTournamentRegistration(guild, game, prize, registrationMinut
   saveState();
   await ghostPingTournamentChannel(channel);
   await channel.send(v2Payload({
-    title: `${TOURNAMENT_TROPHY} Tournament Registration Open`,
+    title: `${customEmojiText('trophy')} Tournament Registration Open`,
     description: `Registration for the **${tournamentGameName(active.game)}** tournament is open.\n\nJoin above before registration closes. The channel stays view-only during registration. Once the bracket starts, only registered players can chat.`,
   }));
   return active;
@@ -3841,7 +3906,7 @@ async function announceTournamentMatchWinner(guild, match) {
   const thread = await getTournamentMatchThread(guild, match);
   if (!thread?.isTextBased() || !match.winner) return;
   await thread.send({
-    content: `${TOURNAMENT_TROPHY} <@${match.winner}> won this match and advances to the next round.`,
+    content: `${customEmojiText('trophy')} <@${match.winner}> won this match and advances to the next round.`,
     allowedMentions: { users: [match.winner] },
   }).catch(() => {});
   setTimeout(async () => {
@@ -3854,7 +3919,7 @@ function makeTicTacToeMatchPayload(active, match) {
   const symbol = id => id === match.p1 ? '❌' : '⭕';
   const turnTimer = match.turnDeadlineAt ? `\n**Time Limit:** 30 seconds • <t:${Math.floor(match.turnDeadlineAt / 1000)}:R>` : '';
   const status = match.winner
-    ? `${TOURNAMENT_TROPHY} **Winner:** <@${match.winner}>`
+    ? `${customEmojiText('trophy')} **Winner:** <@${match.winner}>`
     : `${match.lastResult ? `${match.lastResult}\n` : ''}**Turn:** <@${match.turn}> ${symbol(match.turn)}${turnTimer}`;
   const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
     `# ❌ ⭕ Match ${match.number} - Tic-Tac-Toe\n<@${match.p1}> **vs** <@${match.p2}>\n\n**X:** <@${match.p1}>\n**O:** <@${match.p2}>\n\n${status}\n-# Round ${match.round} • Use this match's thread for discussion. Win to advance.`
@@ -3881,7 +3946,7 @@ function makeRpsMatchPayload(active, match) {
   const locked2 = Boolean(match.choices?.[match.p2]);
   let result = `**<@${match.p1}>:** ${locked1 ? 'Choice locked' : 'Waiting'}\n**<@${match.p2}>:** ${locked2 ? 'Choice locked' : 'Waiting'}`;
   if (match.winner) {
-    result = `🪨📄✂️ <@${match.p1}> chose **${rpsChoiceName(match.choices[match.p1])}**\n<@${match.p2}> chose **${rpsChoiceName(match.choices[match.p2])}**\n\n${TOURNAMENT_TROPHY} **Winner:** <@${match.winner}>`;
+    result = `🪨📄✂️ <@${match.p1}> chose **${rpsChoiceName(match.choices[match.p1])}**\n<@${match.p2}> chose **${rpsChoiceName(match.choices[match.p2])}**\n\n${customEmojiText('trophy')} **Winner:** <@${match.winner}>`;
   } else if (match.lastResult) result = `${match.lastResult}\n\n${result}`;
   const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
     `# 🪨 📄 ✂️ Match ${match.number} - Rock Paper Scissors\n<@${match.p1}> **vs** <@${match.p2}>\n\n${result}\n-# Round ${match.round} • Choices stay hidden until both players lock in. Use this match's thread for discussion.`
@@ -4096,7 +4161,7 @@ async function sendTournamentWinnerDm(member, active) {
   if (!member?.user || !active) return false;
   const container = new ContainerBuilder().addTextDisplayComponents(
     new TextDisplayBuilder().setContent(
-      `# ${TOURNAMENT_TROPHY} Congratulations - You Won!
+      `# ${customEmojiText('trophy')} Congratulations - You Won!
 ` +
       `You won the **${tournamentGameName(active.game)}** tournament in **${escapeMassMentions(member.guild?.name || 'Bloxburg Store')}**.
 
@@ -4116,7 +4181,7 @@ ${escapeMassMentions(active.prize)}
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setLabel('Claim Your Prize')
-      .setEmoji(TOURNAMENT_TROPHY_COMPONENT)
+      .setEmoji(customEmojiComponent('trophy'))
       .setStyle(ButtonStyle.Link)
       .setURL(SUPPORT_TICKETS_URL),
   );
@@ -4147,12 +4212,12 @@ async function finishTournament(guild, winnerId) {
   saveState();
   await setTournamentChannelMode(guild, channel, 'celebration');
   const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
-    `# ${TOURNAMENT_TROPHY} Tournament Champion\n${GIVEAWAY_EMOJI} <@${winnerId}> won the **${tournamentGameName(active.game)}** tournament!\n\n` +
+    `# ${customEmojiText('trophy')} Tournament Champion\n${customEmojiText('giveaway')} <@${winnerId}> won the **${tournamentGameName(active.game)}** tournament!\n\n` +
     `**Prize**\n${escapeMassMentions(active.prize)}\n\n` +
-    `${TOURNAMENT_TROPHY} The **Champion** role has been awarded as a cosmetic winner role.\n` +
-    `${TICKET_EMOJI} Open a support ticket below to claim the prize.\n\n-# Tournament chat is now open to all Customers so everyone can congratulate the winner.`
+    `${customEmojiText('trophy')} The **Champion** role has been awarded as a cosmetic winner role.\n` +
+    `${customEmojiText('ticket')} Open a support ticket below to claim the prize.\n\n-# Tournament chat is now open to all Customers so everyone can congratulate the winner.`
   ));
-  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Claim Prize').setEmoji(TOURNAMENT_TROPHY_COMPONENT).setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL));
+  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Claim Prize').setEmoji(customEmojiComponent('trophy')).setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL));
   await channel.send({ components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 }
 
@@ -4163,7 +4228,7 @@ async function handleTournamentSetup(interaction) {
   saveState();
   const { channel, role } = await ensureTournamentInfrastructure(interaction.guild);
   await syncTournamentChannelMode(interaction.guild, channel);
-  return interaction.reply(v2Payload({ title: `${TOURNAMENT_TROPHY} Tournament System Ready`, description: `**Channel:** ${channel}\n**Customer access:** View-only during registration; registered players can chat during matches; all Customers can chat after a winner is crowned\n**Champion role:** ${role}\n**Daily schedule:** ${state.tournaments.daily.enabled ? `Enabled at ${state.tournaments.daily.time} (${CONFIG.timeZone})` : 'Disabled'}`, ephemeral: true }));
+  return interaction.reply(v2Payload({ title: `${customEmojiText('trophy')} Tournament System Ready`, description: `**Channel:** ${channel}\n**Customer access:** View-only during registration; registered players can chat during matches; all Customers can chat after a winner is crowned\n**Champion role:** ${role}\n**Daily schedule:** ${state.tournaments.daily.enabled ? `Enabled at ${state.tournaments.daily.time} (${CONFIG.timeZone})` : 'Disabled'}`, ephemeral: true }));
 }
 
 async function handleTournamentPrize(interaction) {
@@ -4197,7 +4262,7 @@ async function handleTournamentStart(interaction) {
   if (state.tournaments.active && ['registration','running'].includes(state.tournaments.active.status)) return fail(interaction, 'Tournament Already Active', 'Finish or cancel the current tournament first.');
   const active = await startTournamentRegistration(interaction.guild, game, prize, minutes, 'Manual tournament');
   const channel = interaction.guild.channels.cache.get(state.tournaments.channelId);
-  return interaction.reply(v2Payload({ title: `${TOURNAMENT_TROPHY} Tournament Opened`, description: `Registration is live in ${channel}.\n\n**Game:** ${tournamentGameName(game)}\n**Prize:** ${escapeMassMentions(prize)}\n**Closes:** <t:${Math.floor(active.registrationClosesAt / 1000)}:R>`, ephemeral: true }));
+  return interaction.reply(v2Payload({ title: `${customEmojiText('trophy')} Tournament Opened`, description: `Registration is live in ${channel}.\n\n**Game:** ${tournamentGameName(game)}\n**Prize:** ${escapeMassMentions(prize)}\n**Closes:** <t:${Math.floor(active.registrationClosesAt / 1000)}:R>`, ephemeral: true }));
 }
 
 async function handleTournamentBegin(interaction) {
@@ -4205,7 +4270,7 @@ async function handleTournamentBegin(interaction) {
   if (state.tournaments?.active?.status !== 'registration') return fail(interaction, 'No Registration Open', 'There is no tournament registration to begin.');
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   await beginTournamentBracket(interaction.guild);
-  return interaction.editReply(v2Edit({ title: `${TOURNAMENT_TROPHY} Tournament Started`, description: 'Registration is closed and the first round has been posted.' }));
+  return interaction.editReply(v2Edit({ title: `${customEmojiText('trophy')} Tournament Started`, description: 'Registration is closed and the first round has been posted.' }));
 }
 
 async function handleTournamentStatus(interaction) {
@@ -4231,7 +4296,7 @@ Prize: **${escapeMassMentions(latest.prize || 'Unknown')}**${latest.finishedAt ?
 Ended: <t:${Math.floor(latest.finishedAt / 1000)}:R>` : latest.cancelledAt ? `
 Ended: <t:${Math.floor(latest.cancelledAt / 1000)}:R>` : ''}`
     : `\n\n**Most Recent Tournament**\nNo saved tournament history yet.`;
-  return interaction.reply(v2Payload({ title: `${TOURNAMENT_TROPHY} Tournament Status`, description: `**Channel:** ${channel}
+  return interaction.reply(v2Payload({ title: `${customEmojiText('trophy')} Tournament Status`, description: `**Channel:** ${channel}
 **Daily:** ${t.daily.enabled ? `On at ${t.daily.time} (${CONFIG.timeZone})` : 'Off'}
 **Daily Game:** ${tournamentGameName(t.daily.game || 'mixed')}
 
@@ -4242,7 +4307,7 @@ async function handleTournamentHistory(interaction) {
   if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
   const limit = interaction.options.getInteger('limit') || 10;
   const history = Array.isArray(state.tournaments?.history) ? state.tournaments.history.slice(-limit).reverse() : [];
-  if (!history.length) return interaction.reply(v2Payload({ title: `${TOURNAMENT_TROPHY} Tournament History`, description: 'No completed or cancelled tournaments have been saved yet.', ephemeral: true }));
+  if (!history.length) return interaction.reply(v2Payload({ title: `${customEmojiText('trophy')} Tournament History`, description: 'No completed or cancelled tournaments have been saved yet.', ephemeral: true }));
   const lines = history.map((item, index) => {
     const endedAt = item.finishedAt || item.cancelledAt || item.createdAt || Date.now();
     const winner = item.winnerId ? ` • Winner <@${item.winnerId}>` : '';
@@ -4251,7 +4316,7 @@ Players: **${item.participants?.length || 0}** • Rounds: **${item.round || 0}*
 Prize: ${escapeMassMentions(item.prize || 'Unknown')}
 <t:${Math.floor(endedAt / 1000)}:F>`;
   });
-  return interaction.reply(v2Payload({ title: `${TOURNAMENT_TROPHY} Tournament History`, description: lines.join('\n\n'), ephemeral: true }));
+  return interaction.reply(v2Payload({ title: `${customEmojiText('trophy')} Tournament History`, description: lines.join('\n\n'), ephemeral: true }));
 }
 
 async function handleTournamentCancel(interaction) {
@@ -4312,12 +4377,12 @@ function makeChatDropPayload(drop) {
   const claimed = Boolean(drop.claimedBy);
   const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
     claimed
-      ? `# 💰 Cash Drop Claimed\n${TOURNAMENT_TROPHY} <@${drop.claimedBy}> was the first person to claim **$${Number(drop.amount).toLocaleString()} Bloxburg Cash**!\n\n${TICKET_EMOJI} Use the support button below to claim the prize.`
+      ? `# 💰 Cash Drop Claimed\n${customEmojiText('trophy')} <@${drop.claimedBy}> was the first person to claim **$${Number(drop.amount).toLocaleString()} Bloxburg Cash**!\n\n${customEmojiText('ticket')} Use the support button below to claim the prize.`
       : `# 💸 CHAT DROP\n**$${Number(drop.amount).toLocaleString()} Bloxburg Cash** is up for grabs!\n\n⚡ **First person to click wins.**\n-# One claim only. Be quick.`
   ));
   const row = new ActionRowBuilder();
   if (!claimed) row.addComponents(new ButtonBuilder().setCustomId(`chatdrop:claim:${drop.id}`).setLabel('Claim Drop').setEmoji('💰').setStyle(ButtonStyle.Success));
-  else row.addComponents(new ButtonBuilder().setLabel('Claim Prize').setEmoji(TICKET_EMOJI_COMPONENT).setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL));
+  else row.addComponents(new ButtonBuilder().setLabel('Claim Prize').setEmoji(customEmojiComponent('ticket')).setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL));
   return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
 }
 
@@ -4485,7 +4550,7 @@ function makeFaqPayload() {
       container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${i + 1}. ${escapeMassMentions(item.question)}\n${escapeMassMentions(item.answer)}`));
     }
   }
-  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Make a Support Ticket').setEmoji(TICKET_EMOJI_COMPONENT).setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL));
+  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Make a Support Ticket').setEmoji(customEmojiComponent('ticket')).setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL));
   return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
 }
 
@@ -4546,6 +4611,27 @@ async function refreshFaqMessage(guild) {
   state.faq.messageId = msg.id;
   saveState();
   return { channel, msg };
+}
+
+async function handleEmojiCheck(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+
+  await resolveConfiguredCustomEmojis();
+  const lines = [];
+  for (const [key, spec] of Object.entries(CUSTOM_EMOJI_SPECS)) {
+    const emoji = resolvedCustomEmojis.get(key);
+    if (emoji) {
+      lines.push(`**${key}** - ${customEmojiText(key)} found as \`${emoji.name}\` (ID \`${emoji.id}\`) in **${escapeMassMentions(emoji.guild?.name || 'connected server')}**`);
+    } else {
+      lines.push(`**${key}** - NOT FOUND (ID \`${spec.id}\`). The bot cannot render this custom emoji until it can access the server that owns it.`);
+    }
+  }
+
+  return interaction.reply(v2Payload({
+    title: 'Custom Emoji Check',
+    description: `${lines.join('\n')}\n\nThe FAQ/tournament/drop panels now use the fetched Discord emoji object directly for button emojis.`,
+    ephemeral: true,
+  }));
 }
 
 async function handleFaqAdd(interaction) {
