@@ -82,22 +82,22 @@ Members with closed DMs are counted as failed deliveries rather than stopping th
 
 ## PvP tournaments
 
-The bot automatically creates a customer-only `#pvp-tournaments` channel and a cosmetic `Champion` role with no permissions. `@everyone` cannot see the tournament channel; the configured Customer role can view it. Customer chat is locked while no tournament is running, opens when registration begins, and locks again when the tournament finishes or is cancelled.
+The bot automatically creates a customer-only `#pvp-tournaments` channel and a cosmetic `Champion` role with no permissions. `@everyone` cannot see the tournament channel; the configured Customer role can view it. Registration is view-only. Once the bracket starts, only registered participants can chat in the main tournament channel. Every match gets its own thread; after a champion is crowned, the main channel opens to all Customers so they can congratulate the winner.
 
-Games included in v2.4:
+Games included in v2.8:
 - **Tic-Tac-Toe** - real 3x3 Discord button board, turn enforcement, automatic draw rematches and round advancement.
 - **Rock Paper Scissors** - private hidden choices until both players lock in, tie rematches and automatic round advancement.
 
 Tournament commands:
 - `/tournamentsetup [channel_name]` - create/repair the channel and Champion role.
 - `/tournamentprize game prize` - save the normal prize text for each game.
-- `/tournamentdaily enabled [time] [game]` - enable/disable the daily tournament and choose `HH:MM`, one game, or rotating games. Default is **19:00 Pacific/Auckland** with game rotation.
-- `/tournamentstart game [prize] [registration_minutes]` - manually open registration now.
+- `/tournamentdaily enabled [time] [game]` - enable/disable the daily tournament and choose `HH:MM` plus a game pool. Default is **19:00 Pacific/Auckland** with **Mixed PvP Games**.
+- `/tournamentstart [game] [prize] [registration_minutes]` - manually open registration now. The game defaults to **Mixed PvP Games**.
 - `/tournamentbegin` - close registration and start the bracket immediately.
 - `/tournamentstatus` - show configuration/current round.
 - `/tournamentcancel` - stop the active tournament and lock chat.
 
-Daily/manual tournaments use a timed registration stage with **no fixed player cap**. However many eligible customers join before registration closes become the bracket; odd-sized rounds automatically receive byes until one player remains. The winner receives the cosmetic **Champion** role and a V2 winner panel with a **Claim Prize** button linking to the support-ticket channel.
+Daily/manual tournaments use a timed registration stage with **no fixed player cap**. However many eligible customers join before registration closes become the bracket; odd-sized rounds use an **Automatic Advance** until one player remains. Mixed tournaments split matches between Tic-Tac-Toe and Rock Paper Scissors, and a draw/tie switches that match to the other game. The winner receives the cosmetic **Champion** role and a V2 winner panel with a **Claim Prize** button linking to the support-ticket channel.
 
 ## Random chat drops
 
@@ -242,7 +242,7 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 
 `/censoradd` accepts multiple words at once. Each space/comma-separated censor entry becomes its own trigger word. If any trigger appears in a non-bot message anywhere in the server, the whole message is deleted. Existing older multi-word censor entries are automatically split into individual trigger words when state is loaded.
 
-## v2.4 changes
+## v2.5 changes
 
 - Keeps every v2.2 tournament, chat-drop, FAQ, moderation, analytics and poll feature.
 - Tournament panels and winners now use `<a:Trophy_fixed:1545550040628461588>` as the trophy emoji.
@@ -250,8 +250,46 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 - Odd player counts continue to use automatic byes so brackets work with any signup count of 2 or more.
 
 
-## Customer-only FAQ hardening (v2.4)
+## Customer-only FAQ hardening (v2.5)
 - `#faq` is visible to the configured Customer role only (Administrators still bypass Discord channel denies).
 - Customers can read history but cannot send messages, react, create threads, or send in threads.
 - Existing role-specific FAQ overwrites are replaced so old View Channel grants do not leak access.
 - The bot discovers and edits the existing FAQ V2 panel after restarts, and automatically deletes duplicate FAQ panels instead of reposting them.
+
+## v2.5 tournament reliability
+
+- Uses `<a:Trophy_fixed:1545550040628461588>` throughout tournament V2 displays and as a real custom button emoji.
+- Ghost-pings `@everyone` in the customer-only tournament channel when registration opens, then deletes the ping message.
+- Winners receive a Components V2 DM with the prize and a direct Support claim button.
+- Completed/cancelled tournaments are retained in persistent history (`/tournamenthistory`) instead of being overwritten by the next event.
+- State storage automatically uses a Railway Volume mount when available (or `/data`) and keeps `state.json.bak` as a recovery copy. For Railway, mount a Volume at `/data` so data survives deployments.
+
+## v2.7 tournament match threads
+
+- Mixed PvP Games are now the default tournament format, so one tournament can contain both Tic-Tac-Toe and Rock Paper Scissors matches.
+- Each match post automatically creates its own thread underneath the match message.
+- The two matched players are pinged in their thread when the match begins.
+- Tic-Tac-Toe match cards explicitly show which player is **X** and which player is **O**.
+- The current Tic-Tac-Toe player is pinged in the match thread after every move.
+- In Rock Paper Scissors, the remaining player is pinged after their opponent locks a choice.
+- A Tic-Tac-Toe draw switches the match to Rock Paper Scissors; an RPS tie switches it to Tic-Tac-Toe.
+- During the bracket, only registered tournament players can send messages in the main tournament channel.
+- Match-thread messages from anyone other than that match's two players are automatically removed (staff/admin moderation access is preserved).
+- Finished match threads are locked and archived automatically.
+- After the tournament winner is crowned, the main tournament channel opens to all Customers so they can congratulate the champion.
+
+
+
+## v2.7 additions
+
+- Tic-Tac-Toe turns have a 30-second timer. If a player does not move, their turn is skipped and the opponent is pinged with a fresh 30-second turn. The deadline is stored in tournament state so it resumes safely after a restart.
+- Tournament round headers use `<:SmileyTom:1537715428233715742>` instead of the game-console emoji.
+- Discord-link filtering is explicitly disabled for channels and threads whose category is `1537689865666166859`, `1537689865666166861`, `1542835269240094730`, or `1544254003636994048`.
+
+
+## v2.8 custom tournament emojis
+
+- Tournament celebration uses `<:giveaway:1540636417577721927>` instead of the native party emoji.
+- Support / claim buttons use `<:ticket:1540639436436406332>` as a real Discord custom component emoji.
+- Champion references use `<a:Trophy_fixed:1545550040628461588>` instead of the native crown emoji.
+- Existing SmileyTom round headers and the animated tournament trophy remain unchanged.

@@ -1,9 +1,9 @@
 {
   "name": "bloxy-moderation-bot",
-  "version": "2.4.0",
+  "version": "2.8.0",
   "private": true,
   "type": "module",
-  "description": "Standalone Discord moderation, security, analytics, tournaments, chat drops, DM polls and a Customer-only read-only FAQ system with duplicate-panel recovery and V2 components.",
+  "description": "Standalone Discord moderation, security, analytics, persistent PvP tournaments, chat drops, DM polls and Customer-only FAQ with V2 components.",
   "main": "src/index.js",
   "scripts": {
     "start": "node --env-file-if-exists=.env src/index.js",
