@@ -79,6 +79,33 @@ Join/leave analytics begin when v1.8+ first starts; Discord does not provide his
 
 Members with closed DMs are counted as failed deliveries rather than stopping the broadcast. The bot uses a small worker pool instead of launching every DM request at once.
 
+
+### Interactive DM polls
+The bot can create multi-question surveys and DM them to the whole server or only one role. Members receive one clean Components V2 poll DM with a **Start Poll** button, then move through the questions interactively.
+
+Commands:
+- `/dmpollcreate name title [description]` - creates a draft poll and gives it a short poll ID.
+- `/dmquestion poll question type [options] [required]` - adds a question. Supported types are pick-one, pick-multiple, written answer, Yes/No, and 1-5 rating.
+- `/dmquestionremove poll number` - removes a draft question.
+- `/dmpollview poll` - previews the question set and current response counts.
+- `/dmpolllist` - lists saved polls, IDs, status, question count and submissions.
+- `/dmallpoll poll [role]` - sends the poll to every non-bot member by default, or only members with the selected role. Re-running it skips members who already received that poll and can pick up new matching members.
+- `/dmpollresults poll` - posts a fresh aggregate summary into the private poll-results channel.
+- `/dmpollexport poll` - posts a CSV containing every submitted answer into the private poll-results channel.
+- `/dmpollclose poll` - stops future submissions from existing DM buttons.
+- `/setpollchannel channel` - chooses an existing private text channel for poll data.
+
+Question behavior:
+- Pick-one / Yes-No / 1-5 questions use a select menu.
+- Pick-multiple questions let the member choose several options.
+- Written questions open a Discord modal so the member can type a longer answer.
+- Optional questions can be skipped.
+- A final **Submit Poll** button commits the response.
+
+Poll data is private by default. If `POLL_RESULTS_CHANNEL_ID` is blank and `/setpollchannel` has not been used, the bot automatically creates `#dm-poll-results` with `@everyone` denied View Channel. Each completed response is posted there, a live aggregate summary is updated, and `/dmpollexport` can produce a full CSV. `/setpollchannel` refuses to use a channel that is visible to `@everyone`.
+
+The poll definitions, delivery records, answers, submissions and selected results channel are stored in `data/state.json`, so use persistent Railway storage for this feature too.
+
 ### Status rotator
 The bot rotates its Discord activity every 20 seconds. The included messages are:
 - `Watching over Bloxburg Store`
@@ -169,3 +196,10 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 ## Censor behavior
 
 `/censoradd` accepts multiple words at once. Each space/comma-separated censor entry becomes its own trigger word. If any trigger appears in a non-bot message anywhere in the server, the whole message is deleted. Existing older multi-word censor entries are automatically split into individual trigger words when state is loaded.
+
+## v2.1 changes
+
+- The private `dm-poll-results` channel is created automatically at startup, before any poll is sent.
+- If that results channel is deleted, the bot recreates it automatically and stores the replacement ID.
+- `/servergraph` now renders totals, net growth, peak activity, y-axis values, date labels, and numeric join/leave values directly on the PNG.
+- The graph remains dependency-free, so Railway does not need native canvas packages.

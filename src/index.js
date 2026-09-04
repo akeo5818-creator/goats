@@ -1,6 +1,9 @@
 import {
+  ActionRowBuilder,
   ActivityType,
   AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   Client,
   ContainerBuilder,
@@ -8,13 +11,18 @@ import {
   MediaGalleryBuilder,
   MediaGalleryItemBuilder,
   MessageFlags,
+  ModalBuilder,
+  OverwriteType,
   Partials,
   PermissionFlagsBits,
   PermissionsBitField,
   REST,
   Routes,
   SlashCommandBuilder,
+  StringSelectMenuBuilder,
   TextDisplayBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from 'discord.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -35,6 +43,7 @@ const CONFIG = {
   baptismChannelId: process.env.BAPTISM_CHANNEL_ID || '1537689865267974193',
   modLogChannelId: process.env.MOD_LOG_CHANNEL_ID || '1537728472997306389',
   dmLogChannelId: process.env.DM_LOG_CHANNEL_ID || '1541705487052046408',
+  pollResultsChannelId: process.env.POLL_RESULTS_CHANNEL_ID || null,
   adminAlertRoleId: process.env.ADMIN_ALERT_ROLE_ID || null,
   altAlertThreshold: clampNumber(Number(process.env.ALT_ALERT_THRESHOLD || 40), 20, 100, 40),
 };
@@ -322,6 +331,83 @@ const commands = [
     .setDescription('Show information and uptime for this moderation bot.'),
 
   new SlashCommandBuilder()
+    .setName('dmpollcreate')
+    .setDescription('Create a saved DM poll draft.')
+    .addStringOption(o => o.setName('name').setDescription('Short internal poll name.').setRequired(true).setMinLength(2).setMaxLength(40))
+    .addStringOption(o => o.setName('title').setDescription('Title members see in the DM.').setRequired(true).setMinLength(2).setMaxLength(100))
+    .addStringOption(o => o.setName('description').setDescription('Optional introduction shown before they start.').setMaxLength(1200))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('dmquestion')
+    .setDescription('Add a question to a saved DM poll.')
+    .addStringOption(o => o.setName('poll').setDescription('Poll ID or exact poll name.').setRequired(true).setMaxLength(40))
+    .addStringOption(o => o.setName('question').setDescription('Question to ask.').setRequired(true).setMinLength(2).setMaxLength(300))
+    .addStringOption(o => o
+      .setName('type')
+      .setDescription('How members answer this question.')
+      .setRequired(true)
+      .addChoices(
+        { name: 'Pick one answer', value: 'choice' },
+        { name: 'Pick multiple answers', value: 'multiple' },
+        { name: 'Type an answer', value: 'text' },
+        { name: 'Yes or No', value: 'yes_no' },
+        { name: 'Rating 1 to 5', value: 'rating' },
+      ))
+    .addStringOption(o => o.setName('options').setDescription('For pick questions: separate answers with commas or | characters.').setMaxLength(1200))
+    .addBooleanOption(o => o.setName('required').setDescription('Require an answer before continuing. Defaults to yes.'))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('dmquestionremove')
+    .setDescription('Remove a question from a saved DM poll.')
+    .addStringOption(o => o.setName('poll').setDescription('Poll ID or exact poll name.').setRequired(true).setMaxLength(40))
+    .addIntegerOption(o => o.setName('number').setDescription('Question number to remove.').setRequired(true).setMinValue(1).setMaxValue(10))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('dmpollview')
+    .setDescription('Preview a saved DM poll and its questions.')
+    .addStringOption(o => o.setName('poll').setDescription('Poll ID or exact poll name.').setRequired(true).setMaxLength(40))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('dmpolllist')
+    .setDescription('List saved DM polls and response counts.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('dmallpoll')
+    .setDescription('DM a saved interactive poll to everyone or one specific role.')
+    .addStringOption(o => o.setName('poll').setDescription('Poll ID or exact poll name.').setRequired(true).setMaxLength(40))
+    .addRoleOption(o => o.setName('role').setDescription('Optional role. If omitted, every non-bot member is targeted.'))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('dmpollresults')
+    .setDescription('Post the latest aggregate poll data to the private results channel.')
+    .addStringOption(o => o.setName('poll').setDescription('Poll ID or exact poll name.').setRequired(true).setMaxLength(40))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('dmpollexport')
+    .setDescription('Export all poll responses as CSV to the private results channel.')
+    .addStringOption(o => o.setName('poll').setDescription('Poll ID or exact poll name.').setRequired(true).setMaxLength(40))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('dmpollclose')
+    .setDescription('Close a poll so no more responses can be submitted.')
+    .addStringOption(o => o.setName('poll').setDescription('Poll ID or exact poll name.').setRequired(true).setMaxLength(40))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('setpollchannel')
+    .setDescription('Choose the private channel used for DM poll response data.')
+    .addChannelOption(o => o.setName('channel').setDescription('Private text channel for poll data.').setRequired(true).addChannelTypes(ChannelType.GuildText))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('dmall')
     .setDescription('DM a plain-text announcement to all members or one role.')
     .addStringOption(o => o.setName('message').setDescription('Plain-text message to send.').setRequired(true).setMinLength(1).setMaxLength(2000))
@@ -353,6 +439,16 @@ client.once('ready', async () => {
   setInterval(checkTempBans, 60_000).unref();
   await checkBaptismSchedule();
   await checkTempBans();
+
+  // Keep DM poll analytics zero-setup. The private results channel is created
+  // as soon as the bot is ready, even before the first poll is broadcast.
+  try {
+    const guild = await client.guilds.fetch(CONFIG.guildId);
+    const pollChannel = await ensurePollResultsChannel(guild);
+    console.log(`[DM POLL] Private results channel ready: #${pollChannel.name} (${pollChannel.id})`);
+  } catch (error) {
+    console.error('[DM POLL] Could not prepare the private results channel:', error);
+  }
 });
 
 function startStatusRotator() {
@@ -396,6 +492,30 @@ client.on('channelCreate', async channel => {
   } catch (error) {
     console.error(`[LOCKDOWN] Failed to apply lockdown to new channel ${channel.id}:`, error);
   }
+});
+
+
+client.on('channelDelete', async channel => {
+  if (channel.guild?.id !== CONFIG.guildId) return;
+  const wasPollResults = channel.id === state.pollResultsChannelId || channel.id === CONFIG.pollResultsChannelId;
+  if (!wasPollResults) return;
+
+  // If the private poll-results channel is ever deleted, forget the stale ID
+  // and automatically replace it so future submissions never disappear.
+  if (state.pollResultsChannelId === channel.id) {
+    state.pollResultsChannelId = null;
+    saveState();
+  }
+
+  setTimeout(async () => {
+    try {
+      const guild = await client.guilds.fetch(CONFIG.guildId);
+      const replacement = await ensurePollResultsChannel(guild);
+      console.log(`[DM POLL] Recreated private results channel: #${replacement.name} (${replacement.id})`);
+    } catch (error) {
+      console.error('[DM POLL] Failed to recreate deleted results channel:', error);
+    }
+  }, 1500).unref();
 });
 
 
@@ -457,10 +577,22 @@ client.on('guildBanRemove', async ban => {
 });
 
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  if (!interaction.inGuild() || interaction.guildId !== CONFIG.guildId) return;
-
   try {
+    if (interaction.isButton()) {
+      if (interaction.customId.startsWith('dmpoll:')) return handleDmPollButton(interaction);
+      return;
+    }
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith('dmpoll:')) return handleDmPollSelect(interaction);
+      return;
+    }
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith('dmpoll:')) return handleDmPollModal(interaction);
+      return;
+    }
+    if (!interaction.isChatInputCommand()) return;
+    if (!interaction.inGuild() || interaction.guildId !== CONFIG.guildId) return;
+
     switch (interaction.commandName) {
       case 'lockdown': return handleLockdown(interaction);
       case 'unlockdown': return handleUnlockdown(interaction);
@@ -499,16 +631,26 @@ client.on('interactionCreate', async interaction => {
       case 'servericon': return handleServerIcon(interaction);
       case 'ping': return handlePing(interaction);
       case 'botinfo': return handleBotInfo(interaction);
+      case 'dmpollcreate': return handleDmPollCreate(interaction);
+      case 'dmquestion': return handleDmQuestion(interaction);
+      case 'dmquestionremove': return handleDmQuestionRemove(interaction);
+      case 'dmpollview': return handleDmPollView(interaction);
+      case 'dmpolllist': return handleDmPollList(interaction);
+      case 'dmallpoll': return handleDmAllPoll(interaction);
+      case 'dmpollresults': return handleDmPollResults(interaction);
+      case 'dmpollexport': return handleDmPollExport(interaction);
+      case 'dmpollclose': return handleDmPollClose(interaction);
+      case 'setpollchannel': return handleSetPollChannel(interaction);
       case 'dmall': return handleDmAll(interaction);
       default: return;
     }
   } catch (error) {
-    console.error(`[INTERACTION] ${interaction.commandName} failed:`, error);
+    console.error(`[INTERACTION] ${interaction.commandName || interaction.customId || interaction.type} failed:`, error);
     const payload = v2Payload({
       title: 'Command Failed',
       description: `Something went wrong while running this command.\n\n\`${truncate(error?.message || String(error), 700)}\``,
       accentColor: 0xED4245,
-      ephemeral: true,
+      ephemeral: interaction.isChatInputCommand?.() ? true : false,
     });
 
     if (interaction.replied || interaction.deferred) {
@@ -1347,50 +1489,195 @@ function formatDurationFriendly(ms) {
 }
 
 function renderActivityGraphPng(buckets) {
-  const width = 1200;
-  const height = 560;
+  const width = 1320;
+  const height = 760;
   const pixels = Buffer.alloc(width * height * 4);
-  const bg = [35, 36, 40, 255];
+
+  const COLORS = {
+    bg: [24, 25, 28, 255],
+    panel: [35, 36, 40, 255],
+    card: [43, 45, 49, 255],
+    grid: [63, 65, 72, 255],
+    axis: [112, 115, 124, 255],
+    text: [242, 243, 245, 255],
+    muted: [177, 180, 188, 255],
+    join: [88, 101, 242, 255],
+    leave: [237, 66, 69, 255],
+    positive: [87, 242, 135, 255],
+    negative: [242, 112, 112, 255],
+  };
+
   for (let i = 0; i < width * height; i++) {
-    pixels[i * 4] = bg[0]; pixels[i * 4 + 1] = bg[1]; pixels[i * 4 + 2] = bg[2]; pixels[i * 4 + 3] = bg[3];
+    pixels[i * 4] = COLORS.bg[0];
+    pixels[i * 4 + 1] = COLORS.bg[1];
+    pixels[i * 4 + 2] = COLORS.bg[2];
+    pixels[i * 4 + 3] = 255;
   }
+
   const setPixel = (x, y, color) => {
     x = Math.round(x); y = Math.round(y);
     if (x < 0 || y < 0 || x >= width || y >= height) return;
     const i = (y * width + x) * 4;
     pixels[i] = color[0]; pixels[i + 1] = color[1]; pixels[i + 2] = color[2]; pixels[i + 3] = color[3] ?? 255;
   };
+
   const rect = (x, y, w, h, color) => {
     const x0 = Math.max(0, Math.floor(x)); const x1 = Math.min(width, Math.ceil(x + w));
     const y0 = Math.max(0, Math.floor(y)); const y1 = Math.min(height, Math.ceil(y + h));
     for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) setPixel(xx, yy, color);
   };
-  const margin = { left: 60, right: 35, top: 35, bottom: 45 };
+
+  // Compact 5x7 bitmap font so the generated PNG has real labels and values
+  // without adding a native canvas dependency to Railway.
+  const FONT = {
+    'A':['01110','10001','10001','11111','10001','10001','10001'],
+    'B':['11110','10001','10001','11110','10001','10001','11110'],
+    'C':['01111','10000','10000','10000','10000','10000','01111'],
+    'D':['11110','10001','10001','10001','10001','10001','11110'],
+    'E':['11111','10000','10000','11110','10000','10000','11111'],
+    'F':['11111','10000','10000','11110','10000','10000','10000'],
+    'G':['01111','10000','10000','10111','10001','10001','01111'],
+    'H':['10001','10001','10001','11111','10001','10001','10001'],
+    'I':['11111','00100','00100','00100','00100','00100','11111'],
+    'J':['00111','00010','00010','00010','00010','10010','01100'],
+    'K':['10001','10010','10100','11000','10100','10010','10001'],
+    'L':['10000','10000','10000','10000','10000','10000','11111'],
+    'M':['10001','11011','10101','10101','10001','10001','10001'],
+    'N':['10001','11001','10101','10011','10001','10001','10001'],
+    'O':['01110','10001','10001','10001','10001','10001','01110'],
+    'P':['11110','10001','10001','11110','10000','10000','10000'],
+    'Q':['01110','10001','10001','10001','10101','10010','01101'],
+    'R':['11110','10001','10001','11110','10100','10010','10001'],
+    'S':['01111','10000','10000','01110','00001','00001','11110'],
+    'T':['11111','00100','00100','00100','00100','00100','00100'],
+    'U':['10001','10001','10001','10001','10001','10001','01110'],
+    'V':['10001','10001','10001','10001','10001','01010','00100'],
+    'W':['10001','10001','10001','10101','10101','10101','01010'],
+    'X':['10001','10001','01010','00100','01010','10001','10001'],
+    'Y':['10001','10001','01010','00100','00100','00100','00100'],
+    'Z':['11111','00001','00010','00100','01000','10000','11111'],
+    '0':['01110','10001','10011','10101','11001','10001','01110'],
+    '1':['00100','01100','00100','00100','00100','00100','01110'],
+    '2':['01110','10001','00001','00010','00100','01000','11111'],
+    '3':['11110','00001','00001','01110','00001','00001','11110'],
+    '4':['00010','00110','01010','10010','11111','00010','00010'],
+    '5':['11111','10000','10000','11110','00001','00001','11110'],
+    '6':['01110','10000','10000','11110','10001','10001','01110'],
+    '7':['11111','00001','00010','00100','01000','01000','01000'],
+    '8':['01110','10001','10001','01110','10001','10001','01110'],
+    '9':['01110','10001','10001','01111','00001','00001','01110'],
+    '+':['00000','00100','00100','11111','00100','00100','00000'],
+    '-':['00000','00000','00000','11111','00000','00000','00000'],
+    ':':['00000','00100','00100','00000','00100','00100','00000'],
+    '/':['00001','00010','00010','00100','01000','01000','10000'],
+    '.':['00000','00000','00000','00000','00000','00100','00100'],
+    ' ':['00000','00000','00000','00000','00000','00000','00000'],
+  };
+
+  const textWidth = (text, scale = 1) => Math.max(0, String(text).length * 6 * scale - scale);
+  const drawText = (text, x, y, scale = 1, color = COLORS.text, align = 'left') => {
+    const value = String(text).toUpperCase();
+    let xx = x;
+    if (align === 'center') xx -= textWidth(value, scale) / 2;
+    if (align === 'right') xx -= textWidth(value, scale);
+    for (const ch of value) {
+      const glyph = FONT[ch] || FONT[' '];
+      for (let row = 0; row < 7; row++) {
+        for (let col = 0; col < 5; col++) {
+          if (glyph[row][col] === '1') rect(xx + col * scale, y + row * scale, scale, scale, color);
+        }
+      }
+      xx += 6 * scale;
+    }
+  };
+
+  const totals = buckets.reduce((acc, b) => ({ joins: acc.joins + b.joins, leaves: acc.leaves + b.leaves }), { joins: 0, leaves: 0 });
+  const net = totals.joins - totals.leaves;
+  const peakJoin = buckets.reduce((best, b) => b.joins > best.joins ? b : best, buckets[0] || { joins: 0, label: '-' });
+  const peakLeave = buckets.reduce((best, b) => b.leaves > best.leaves ? b : best, buckets[0] || { leaves: 0, label: '-' });
+
+  // Header and summary cards.
+  drawText('SERVER GROWTH', 42, 28, 4, COLORS.text);
+  drawText(`LAST ${buckets.length} DAYS`, 44, 67, 2, COLORS.muted);
+
+  const cards = [
+    { label: 'JOINS', value: totals.joins, color: COLORS.join },
+    { label: 'LEAVES', value: totals.leaves, color: COLORS.leave },
+    { label: 'NET', value: formatSigned(net), color: net >= 0 ? COLORS.positive : COLORS.negative },
+    { label: 'PEAK JOIN', value: peakJoin?.joins || 0, color: COLORS.text },
+  ];
+  const cardY = 105, cardH = 76, cardGap = 14, cardW = (width - 84 - cardGap * 3) / 4;
+  cards.forEach((card, i) => {
+    const x = 42 + i * (cardW + cardGap);
+    rect(x, cardY, cardW, cardH, COLORS.card);
+    rect(x, cardY, 4, cardH, card.color);
+    drawText(card.label, x + 18, cardY + 14, 2, COLORS.muted);
+    drawText(String(card.value), x + 18, cardY + 42, 3, card.color);
+  });
+
+  const margin = { left: 92, right: 42, top: 222, bottom: 105 };
   const chartW = width - margin.left - margin.right;
   const chartH = height - margin.top - margin.bottom;
-  const max = Math.max(1, ...buckets.flatMap(b => [b.joins, b.leaves]));
-  const grid = [82, 84, 92, 255];
+  rect(margin.left, margin.top, chartW, chartH, COLORS.panel);
+
+  const rawMax = Math.max(1, ...buckets.flatMap(b => [b.joins, b.leaves]));
+  // Keep the scale tight enough that small servers do not get tiny bars while
+  // still using clean, readable 5-step axis values.
+  const axisMax = rawMax <= 5 ? 5
+    : rawMax <= 10 ? 10
+      : rawMax <= 25 ? 25
+        : rawMax <= 50 ? 50
+          : Math.ceil(rawMax / 50) * 50;
+
+  // Y axis/grid labels.
   for (let i = 0; i <= 5; i++) {
+    const value = Math.round(axisMax * (5 - i) / 5);
     const y = margin.top + chartH * (i / 5);
-    rect(margin.left, y, chartW, 2, grid);
+    rect(margin.left, y, chartW, i === 5 ? 2 : 1, i === 5 ? COLORS.axis : COLORS.grid);
+    drawText(String(value), margin.left - 12, y - 4, 1, COLORS.muted, 'right');
   }
-  rect(margin.left, margin.top + chartH, chartW, 3, [120, 122, 130, 255]);
+
   const groupW = chartW / Math.max(1, buckets.length);
-  const gap = Math.max(2, groupW * 0.12);
-  const barW = Math.max(2, (groupW - gap * 3) / 2);
-  const joinColor = [88, 101, 242, 255];
-  const leaveColor = [237, 66, 69, 255];
+  const gap = Math.max(1, groupW * 0.10);
+  const barW = Math.max(2, Math.min(22, (groupW - gap * 3) / 2));
+
   for (let i = 0; i < buckets.length; i++) {
     const b = buckets[i];
-    const baseX = margin.left + i * groupW + gap;
-    const jh = (b.joins / max) * (chartH - 6);
-    const lh = (b.leaves / max) * (chartH - 6);
-    rect(baseX, margin.top + chartH - jh, barW, jh, joinColor);
-    rect(baseX + barW + gap, margin.top + chartH - lh, barW, lh, leaveColor);
+    const center = margin.left + i * groupW + groupW / 2;
+    const jx = center - gap / 2 - barW;
+    const lx = center + gap / 2;
+    const jh = (b.joins / axisMax) * (chartH - 20);
+    const lh = (b.leaves / axisMax) * (chartH - 20);
+    const jy = margin.top + chartH - jh;
+    const ly = margin.top + chartH - lh;
+
+    if (b.joins > 0) rect(jx, jy, barW, jh, COLORS.join);
+    if (b.leaves > 0) rect(lx, ly, barW, lh, COLORS.leave);
+
+    // Numeric values directly on the graph. Zeroes are still shown lightly so
+    // every day has explicit data instead of an ambiguous blank bar.
+    const valueScale = buckets.length <= 14 ? 2 : 1;
+    drawText(String(b.joins), jx + barW / 2, Math.max(margin.top + 4, jy - (valueScale === 2 ? 18 : 10)), valueScale, b.joins ? COLORS.text : COLORS.muted, 'center');
+    drawText(String(b.leaves), lx + barW / 2, Math.max(margin.top + 4, ly - (valueScale === 2 ? 18 : 10)), valueScale, b.leaves ? COLORS.text : COLORS.muted, 'center');
   }
-  // Small legend swatches in the top-left; the V2 text names the colors.
-  rect(margin.left, 10, 28, 12, joinColor);
-  rect(margin.left + 45, 10, 28, 12, leaveColor);
+
+  // Date labels: every day for 7d, every other day for 14d, and roughly weekly
+  // for 30d so the graph remains readable on mobile.
+  const labelEvery = buckets.length <= 7 ? 1 : buckets.length <= 14 ? 2 : 5;
+  buckets.forEach((b, i) => {
+    if (i % labelEvery !== 0 && i !== buckets.length - 1) return;
+    const center = margin.left + i * groupW + groupW / 2;
+    drawText(String(b.label).replace(',', ''), center, margin.top + chartH + 18, buckets.length <= 14 ? 2 : 1, COLORS.muted, 'center');
+  });
+
+  // Legend/footer.
+  const legendY = height - 44;
+  rect(42, legendY, 14, 14, COLORS.join);
+  drawText('JOINS', 66, legendY + 1, 2, COLORS.text);
+  rect(155, legendY, 14, 14, COLORS.leave);
+  drawText('LEAVES', 179, legendY + 1, 2, COLORS.text);
+  drawText(`PEAK LEAVE ${peakLeave?.leaves || 0}`, width - 42, legendY + 1, 2, COLORS.muted, 'right');
+
   return encodeRgbaPng(width, height, pixels);
 }
 
@@ -1874,6 +2161,10 @@ async function handleServerGraph(interaction) {
   const days = value === '30d' ? 30 : value === '14d' ? 14 : 7;
   const buckets = activityBuckets(days);
   const totals = buckets.reduce((acc, b) => ({ joins: acc.joins + b.joins, leaves: acc.leaves + b.leaves }), { joins: 0, leaves: 0 });
+  const peakJoin = buckets.reduce((best, b) => b.joins > best.joins ? b : best, buckets[0] || { joins: 0, label: 'Unknown' });
+  const peakLeave = buckets.reduce((best, b) => b.leaves > best.leaves ? b : best, buckets[0] || { leaves: 0, label: 'Unknown' });
+  const avgJoins = buckets.length ? (totals.joins / buckets.length).toFixed(1) : '0.0';
+  const avgLeaves = buckets.length ? (totals.leaves / buckets.length).toFixed(1) : '0.0';
   const png = renderActivityGraphPng(buckets);
   const attachment = new AttachmentBuilder(png, { name: `server-growth-${days}d.png` });
   const trackingSince = state.memberActivity?.trackingSince || Date.now();
@@ -1881,7 +2172,9 @@ async function handleServerGraph(interaction) {
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(
       `# Server Growth - ${days} Days\n` +
       `**Period:** ${buckets[0]?.label || 'Unknown'} - ${buckets.at(-1)?.label || 'Unknown'} (UTC)\n` +
-      `**Joins:** ${totals.joins}  •  **Leaves:** ${totals.leaves}  •  **Net:** ${formatSigned(totals.joins - totals.leaves)}\n\n` +
+      `**Joins:** ${totals.joins}  •  **Leaves:** ${totals.leaves}  •  **Net:** ${formatSigned(totals.joins - totals.leaves)}\n` +
+      `**Daily Average:** ${avgJoins} joins  •  ${avgLeaves} leaves\n` +
+      `**Peak Join Day:** ${peakJoin.label} (${peakJoin.joins})  •  **Peak Leave Day:** ${peakLeave.label} (${peakLeave.leaves})\n\n` +
       `Blue bars = joins  •  Red bars = leaves\n` +
       `-# Activity is recorded by this bot from <t:${Math.floor(trackingSince / 1000)}:F> onward. Days are grouped in UTC.`
     ));
@@ -1988,12 +2281,616 @@ async function handleBotInfo(interaction) {
     description:
       `**Bot**\n${client.user}\n\n` +
       `**Bot ID**\n\`${client.user.id}\`\n\n` +
-      `**Version**\n1.9.0\n\n` +
+      `**Version**\n2.1.0\n\n` +
       `**Uptime**\n${formatDurationFriendly(uptime)}\n\n` +
       `**Online Since**\n<t:${Math.floor(startedAt / 1000)}:F> (<t:${Math.floor(startedAt / 1000)}:R>)\n\n` +
       `**Registered Commands**\n${commands.length}\n\n` +
       `**Server**\n${escapeMassMentions(guild.name)} (\`${guild.id}\`)`,
   }));
+}
+
+
+function parsePollOptions(value) {
+  return [...new Set(String(value || '')
+    .split(/[|,\n]+/g)
+    .map(v => v.trim())
+    .filter(Boolean))]
+    .slice(0, 25)
+    .map(v => truncate(v, 100));
+}
+
+function findDmPoll(ref) {
+  const raw = String(ref || '').trim();
+  if (!raw) return null;
+  const direct = state.dmPolls?.[raw.toUpperCase()];
+  if (direct) return direct;
+  const lower = raw.toLowerCase();
+  return Object.values(state.dmPolls || {}).find(p => String(p?.name || '').toLowerCase() === lower) || null;
+}
+
+function normalizePollState(poll) {
+  poll.questions = Array.isArray(poll.questions) ? poll.questions : [];
+  poll.responses = poll.responses && typeof poll.responses === 'object' ? poll.responses : {};
+  poll.broadcasts = Array.isArray(poll.broadcasts) ? poll.broadcasts : [];
+  poll.status ||= 'draft';
+  return poll;
+}
+
+function pollQuestionTypeLabel(type) {
+  return ({
+    choice: 'Pick one',
+    multiple: 'Pick multiple',
+    text: 'Written answer',
+    yes_no: 'Yes / No',
+    rating: 'Rating 1-5',
+  })[type] || type;
+}
+
+function pollQuestionOptions(question) {
+  if (question.type === 'yes_no') return ['Yes', 'No'];
+  if (question.type === 'rating') return ['1', '2', '3', '4', '5'];
+  return Array.isArray(question.options) ? question.options : [];
+}
+
+function getPollResponse(poll, userId, create = true) {
+  normalizePollState(poll);
+  let response = poll.responses[userId];
+  if (!response && create) {
+    response = {
+      deliveredAt: Date.now(),
+      startedAt: null,
+      answers: {},
+      submittedAt: null,
+    };
+    poll.responses[userId] = response;
+  }
+  if (response) {
+    response.answers = response.answers && typeof response.answers === 'object' ? response.answers : {};
+  }
+  return response || null;
+}
+
+function formatPollAnswer(value) {
+  if (Array.isArray(value)) return value.length ? value.join(', ') : 'No answer';
+  if (value === null || value === undefined || value === '') return 'No answer';
+  return String(value);
+}
+
+function makePollStartPayload(poll) {
+  const container = new ContainerBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      `# ${escapeMassMentions(poll.title)}\n` +
+      `${poll.description ? `${escapeMassMentions(poll.description)}\n\n` : ''}` +
+      `**Questions:** ${poll.questions.length}\n` +
+      `-# Your answers are sent privately to the server's poll-results channel after you submit.`
+    )
+  );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`dmpoll:start:${poll.id}`)
+      .setLabel('Start Poll')
+      .setStyle(ButtonStyle.Primary)
+  );
+  return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+}
+
+function makePollQuestionPayload(poll, questionIndex) {
+  if (questionIndex >= poll.questions.length) return makePollReviewPayload(poll);
+  const question = poll.questions[questionIndex];
+  const requiredText = question.required ? 'Required' : 'Optional';
+  const container = new ContainerBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      `# ${escapeMassMentions(poll.title)}\n` +
+      `**Question ${questionIndex + 1} of ${poll.questions.length}**\n` +
+      `${escapeMassMentions(question.text)}\n\n` +
+      `-# ${pollQuestionTypeLabel(question.type)} • ${requiredText}`
+    )
+  );
+
+  const rows = [];
+  if (question.type === 'text') {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`dmpoll:text:${poll.id}:${question.id}`)
+        .setLabel('Type Answer')
+        .setStyle(ButtonStyle.Primary)
+    );
+    if (!question.required) {
+      row.addComponents(new ButtonBuilder()
+        .setCustomId(`dmpoll:skip:${poll.id}:${question.id}`)
+        .setLabel('Skip')
+        .setStyle(ButtonStyle.Secondary));
+    }
+    rows.push(row);
+  } else {
+    const options = pollQuestionOptions(question);
+    const select = new StringSelectMenuBuilder()
+      .setCustomId(`dmpoll:select:${poll.id}:${question.id}`)
+      .setPlaceholder(question.type === 'multiple' ? 'Choose one or more answers' : 'Choose an answer')
+      .setMinValues(1)
+      .setMaxValues(question.type === 'multiple' ? Math.max(1, options.length) : 1)
+      .addOptions(options.map((label, index) => ({ label, value: String(index) })));
+    rows.push(new ActionRowBuilder().addComponents(select));
+    if (!question.required) {
+      rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`dmpoll:skip:${poll.id}:${question.id}`)
+          .setLabel('Skip')
+          .setStyle(ButtonStyle.Secondary)
+      ));
+    }
+  }
+
+  return { components: [container, ...rows], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+}
+
+function makePollReviewPayload(poll, response = null) {
+  const answered = response ? Object.keys(response.answers || {}).length : 0;
+  const container = new ContainerBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      `# ${escapeMassMentions(poll.title)}\n` +
+      `You've reached the end of the poll.\n\n` +
+      `**Answered:** ${answered}/${poll.questions.length}\n` +
+      `Press **Submit Poll** to send your answers.`
+    )
+  );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`dmpoll:submit:${poll.id}`)
+      .setLabel('Submit Poll')
+      .setStyle(ButtonStyle.Success)
+  );
+  return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+}
+
+function makePollFinishedPayload(poll) {
+  return v2Edit({
+    title: 'Poll Submitted',
+    description: `Thanks for completing **${poll.title}**. Your response has been recorded.`,
+  });
+}
+
+function validatePollInteraction(interaction, pollId) {
+  const poll = state.dmPolls?.[String(pollId || '').toUpperCase()];
+  if (!poll) return { error: 'This poll no longer exists.' };
+  normalizePollState(poll);
+  const response = getPollResponse(poll, interaction.user.id, false);
+  if (!response) return { error: 'This poll was not sent to your account.' };
+  if (poll.status === 'closed') return { error: 'This poll has been closed and is no longer accepting responses.' };
+  if (response.submittedAt) return { error: 'You already submitted this poll.' };
+  return { poll, response };
+}
+
+async function handleDmPollButton(interaction) {
+  const [, action, pollId, questionId] = interaction.customId.split(':');
+  const checked = validatePollInteraction(interaction, pollId);
+  if (checked.error) return interaction.reply(v2Payload({ title: 'Poll Unavailable', description: checked.error, ephemeral: true })).catch(() => {});
+  const { poll, response } = checked;
+
+  if (action === 'start') {
+    response.startedAt ||= Date.now();
+    saveState();
+    return interaction.update(makePollQuestionPayload(poll, 0));
+  }
+
+  if (action === 'skip') {
+    const index = poll.questions.findIndex(q => q.id === questionId);
+    if (index < 0) return interaction.reply(v2Payload({ title: 'Question Missing', description: 'That question is no longer available.', ephemeral: true }));
+    const q = poll.questions[index];
+    if (q.required) return interaction.reply(v2Payload({ title: 'Answer Required', description: 'This question cannot be skipped.', ephemeral: true }));
+    response.answers[q.id] = { value: null, skipped: true, answeredAt: Date.now() };
+    saveState();
+    const next = index + 1 >= poll.questions.length ? makePollReviewPayload(poll, response) : makePollQuestionPayload(poll, index + 1);
+    return interaction.update(next);
+  }
+
+  if (action === 'text') {
+    const q = poll.questions.find(q => q.id === questionId);
+    if (!q || q.type !== 'text') return interaction.reply(v2Payload({ title: 'Question Missing', description: 'That written question is no longer available.', ephemeral: true }));
+    const modal = new ModalBuilder()
+      .setCustomId(`dmpoll:modal:${poll.id}:${q.id}`)
+      .setTitle(truncate(poll.title, 45));
+    const input = new TextInputBuilder()
+      .setCustomId('answer')
+      .setLabel(truncate(q.text, 45))
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(q.required)
+      .setMaxLength(1500)
+      .setPlaceholder('Type your answer here');
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+    return interaction.showModal(modal);
+  }
+
+  if (action === 'submit') {
+    const missing = poll.questions.filter(q => q.required && !(q.id in response.answers));
+    if (missing.length) {
+      return interaction.reply(v2Payload({
+        title: 'Missing Required Answers',
+        description: `You still need to answer **${missing.length}** required question(s). Re-open the poll DM and start again to complete them.`,
+        ephemeral: true,
+      }));
+    }
+    response.submittedAt = Date.now();
+    saveState();
+    await interaction.update(makePollFinishedPayload(poll));
+    await postPollSubmission(poll, interaction.user, response).catch(error => console.error('[DM POLL] Submission log failed:', error));
+    await updatePollSummaryMessage(poll).catch(error => console.error('[DM POLL] Summary update failed:', error));
+    saveState();
+    return;
+  }
+}
+
+async function handleDmPollSelect(interaction) {
+  const [, action, pollId, questionId] = interaction.customId.split(':');
+  if (action !== 'select') return;
+  const checked = validatePollInteraction(interaction, pollId);
+  if (checked.error) return interaction.reply(v2Payload({ title: 'Poll Unavailable', description: checked.error, ephemeral: true })).catch(() => {});
+  const { poll, response } = checked;
+  const index = poll.questions.findIndex(q => q.id === questionId);
+  if (index < 0) return interaction.reply(v2Payload({ title: 'Question Missing', description: 'That question is no longer available.', ephemeral: true }));
+  const question = poll.questions[index];
+  const options = pollQuestionOptions(question);
+  const values = interaction.values.map(v => options[Number(v)]).filter(v => v !== undefined);
+  response.answers[question.id] = {
+    value: question.type === 'multiple' ? values : (values[0] ?? null),
+    answeredAt: Date.now(),
+  };
+  saveState();
+  const next = index + 1 >= poll.questions.length ? makePollReviewPayload(poll, response) : makePollQuestionPayload(poll, index + 1);
+  return interaction.update(next);
+}
+
+async function handleDmPollModal(interaction) {
+  const [, action, pollId, questionId] = interaction.customId.split(':');
+  if (action !== 'modal') return;
+  const checked = validatePollInteraction(interaction, pollId);
+  if (checked.error) return interaction.reply(v2Payload({ title: 'Poll Unavailable', description: checked.error, ephemeral: true })).catch(() => {});
+  const { poll, response } = checked;
+  const index = poll.questions.findIndex(q => q.id === questionId);
+  if (index < 0) return interaction.reply(v2Payload({ title: 'Question Missing', description: 'That question is no longer available.', ephemeral: true }));
+  const answer = interaction.fields.getTextInputValue('answer').trim();
+  const question = poll.questions[index];
+  if (question.required && !answer) return interaction.reply(v2Payload({ title: 'Answer Required', description: 'Please enter an answer for this required question.', ephemeral: true }));
+  response.answers[question.id] = { value: answer || null, answeredAt: Date.now() };
+  saveState();
+  const next = index + 1 >= poll.questions.length ? makePollReviewPayload(poll, response) : makePollQuestionPayload(poll, index + 1);
+  if (interaction.message?.editable) {
+    await interaction.message.edit(next).catch(() => null);
+    return interaction.deferUpdate().catch(() => {});
+  }
+  return interaction.reply(next);
+}
+
+async function handleDmPollCreate(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const name = interaction.options.getString('name', true).trim();
+  const title = interaction.options.getString('title', true).trim();
+  const description = interaction.options.getString('description')?.trim() || '';
+  const duplicate = Object.values(state.dmPolls || {}).find(p => String(p?.name || '').toLowerCase() === name.toLowerCase());
+  if (duplicate) return fail(interaction, 'Poll Name Exists', `A poll named **${escapeMassMentions(name)}** already exists with ID \`${duplicate.id}\`.`);
+  const id = makeId();
+  state.dmPolls ||= {};
+  state.dmPolls[id] = {
+    id, name, title, description,
+    status: 'draft',
+    createdAt: Date.now(),
+    createdBy: interaction.user.id,
+    questions: [], responses: {}, broadcasts: [], summaryMessageId: null,
+  };
+  saveState();
+  return interaction.reply(v2Payload({
+    title: 'DM Poll Created',
+    description: `**Name:** ${escapeMassMentions(name)}\n**Poll ID:** \`${id}\`\n**Title:** ${escapeMassMentions(title)}\n\nAdd questions with \`/dmquestion\`, then send it with \`/dmallpoll\`.`,
+    ephemeral: true,
+  }));
+}
+
+async function handleDmQuestion(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const poll = findDmPoll(interaction.options.getString('poll', true));
+  if (!poll) return fail(interaction, 'Poll Not Found', 'I could not find a poll with that ID or exact name.');
+  normalizePollState(poll);
+  if (poll.status !== 'draft') return fail(interaction, 'Poll Already Sent', 'Questions are locked after a poll has been broadcast. Create a new poll if you need a different question set.');
+  if (poll.questions.length >= 10) return fail(interaction, 'Question Limit', 'A DM poll can have up to 10 questions.');
+
+  const text = interaction.options.getString('question', true).trim();
+  const type = interaction.options.getString('type', true);
+  const required = interaction.options.getBoolean('required') ?? true;
+  let options = [];
+  if (type === 'choice' || type === 'multiple') {
+    options = parsePollOptions(interaction.options.getString('options'));
+    if (options.length < 2) return fail(interaction, 'Missing Answer Options', 'Pick-one and pick-multiple questions need at least 2 comma-separated or | separated options.');
+  }
+  const question = { id: makeId(), text, type, required, options };
+  poll.questions.push(question);
+  saveState();
+  return interaction.reply(v2Payload({
+    title: 'Question Added',
+    description: `Added **Question ${poll.questions.length}** to **${escapeMassMentions(poll.name)}**.\n\n**${escapeMassMentions(text)}**\nType: ${pollQuestionTypeLabel(type)}\nRequired: ${required ? 'Yes' : 'No'}${options.length ? `\nOptions: ${escapeMassMentions(options.join(', '))}` : ''}`,
+    ephemeral: true,
+  }));
+}
+
+async function handleDmQuestionRemove(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const poll = findDmPoll(interaction.options.getString('poll', true));
+  if (!poll) return fail(interaction, 'Poll Not Found', 'I could not find that poll.');
+  normalizePollState(poll);
+  if (poll.status !== 'draft') return fail(interaction, 'Poll Already Sent', 'Questions are locked after a poll has been broadcast.');
+  const number = interaction.options.getInteger('number', true);
+  if (number > poll.questions.length) return fail(interaction, 'Question Not Found', `That poll only has ${poll.questions.length} question(s).`);
+  const [removed] = poll.questions.splice(number - 1, 1);
+  saveState();
+  return interaction.reply(v2Payload({ title: 'Question Removed', description: `Removed **Question ${number}**: ${escapeMassMentions(removed.text)}`, ephemeral: true }));
+}
+
+function buildPollPreview(poll) {
+  normalizePollState(poll);
+  const submitted = Object.values(poll.responses).filter(r => r?.submittedAt).length;
+  const delivered = Object.keys(poll.responses).length;
+  const lines = poll.questions.length
+    ? poll.questions.map((q, i) => `**${i + 1}. ${escapeMassMentions(q.text)}**\n${pollQuestionTypeLabel(q.type)} • ${q.required ? 'Required' : 'Optional'}${pollQuestionOptions(q).length ? ` • ${escapeMassMentions(pollQuestionOptions(q).join(', '))}` : ''}`).join('\n\n')
+    : 'No questions added yet.';
+  return `**Name:** ${escapeMassMentions(poll.name)}\n**ID:** \`${poll.id}\`\n**Status:** ${poll.status}\n**Delivered:** ${delivered}\n**Submitted:** ${submitted}\n\n${truncate(lines, 2800)}`;
+}
+
+async function handleDmPollView(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const poll = findDmPoll(interaction.options.getString('poll', true));
+  if (!poll) return fail(interaction, 'Poll Not Found', 'I could not find that poll.');
+  return interaction.reply(v2Payload({ title: `DM Poll - ${poll.title}`, description: buildPollPreview(poll), ephemeral: true }));
+}
+
+async function handleDmPollList(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const polls = Object.values(state.dmPolls || {}).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  if (!polls.length) return interaction.reply(v2Payload({ title: 'DM Polls', description: 'No saved polls yet. Use `/dmpollcreate` to make one.', ephemeral: true }));
+  const body = polls.slice(0, 20).map(p => {
+    normalizePollState(p);
+    const submitted = Object.values(p.responses).filter(r => r?.submittedAt).length;
+    return `**${escapeMassMentions(p.name)}** • \`${p.id}\` • ${p.status} • ${p.questions.length}Q • ${submitted}/${Object.keys(p.responses).length} submitted`;
+  }).join('\n');
+  return interaction.reply(v2Payload({ title: 'Saved DM Polls', description: body, ephemeral: true }));
+}
+
+async function handleSetPollChannel(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const channel = interaction.options.getChannel('channel', true);
+  if (channel.type !== ChannelType.GuildText) return fail(interaction, 'Invalid Channel', 'Choose a normal text channel.');
+  const everyoneCanView = channel.permissionsFor(interaction.guild.roles.everyone)?.has(PermissionFlagsBits.ViewChannel);
+  if (everyoneCanView) return fail(interaction, 'Channel Is Public', 'For privacy, the poll-results channel must not be visible to @everyone. Make it private first, then run this command again.');
+  state.pollResultsChannelId = channel.id;
+  saveState();
+  return interaction.reply(v2Payload({ title: 'Poll Results Channel Set', description: `Future DM poll submissions and data will go to ${channel}.`, ephemeral: true }));
+}
+
+async function ensurePollResultsChannel(guild) {
+  const candidates = [state.pollResultsChannelId, CONFIG.pollResultsChannelId].filter(Boolean);
+  for (const id of candidates) {
+    const channel = await guild.channels.fetch(id).catch(() => null);
+    if (channel?.type !== ChannelType.GuildText) continue;
+    const everyoneCanView = channel.permissionsFor(guild.roles.everyone)?.has(PermissionFlagsBits.ViewChannel);
+    if (!everyoneCanView) {
+      if (state.pollResultsChannelId !== channel.id) {
+        state.pollResultsChannelId = channel.id;
+        saveState();
+      }
+      return channel;
+    }
+    console.warn(`[DM POLL] Configured results channel ${id} is visible to @everyone; refusing to use it for private poll data.`);
+  }
+
+  // Recover an existing private channel by name as well. This avoids creating
+  // duplicate dm-poll-results channels if Railway restarts without persisted
+  // state or the saved channel ID is ever lost.
+  const fetched = await guild.channels.fetch().catch(() => guild.channels.cache);
+  const existingNamed = fetched.find?.(channel => {
+    if (channel?.type !== ChannelType.GuildText || channel.name !== 'dm-poll-results') return false;
+    return !channel.permissionsFor(guild.roles.everyone)?.has(PermissionFlagsBits.ViewChannel);
+  });
+  if (existingNamed) {
+    state.pollResultsChannelId = existingNamed.id;
+    saveState();
+    return existingNamed;
+  }
+
+  const me = guild.members.me || await guild.members.fetchMe();
+  const privateAccess = [
+    { id: guild.roles.everyone.id, type: OverwriteType.Role, deny: [PermissionFlagsBits.ViewChannel] },
+    { id: me.id, type: OverwriteType.Member, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
+    { id: guild.ownerId, type: OverwriteType.Member, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
+  ];
+  if (CONFIG.adminAlertRoleId && guild.roles.cache.has(CONFIG.adminAlertRoleId)) {
+    privateAccess.push({
+      id: CONFIG.adminAlertRoleId,
+      type: OverwriteType.Role,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+    });
+  }
+
+  const channel = await guild.channels.create({
+    name: 'dm-poll-results',
+    type: ChannelType.GuildText,
+    topic: 'Private DM poll responses, live summaries, and exports.',
+    reason: 'Private results channel for DM polls',
+    permissionOverwrites: privateAccess,
+  });
+  state.pollResultsChannelId = channel.id;
+  saveState();
+  await channel.send(v2Payload({
+    title: 'DM Poll Results',
+    description: 'This private channel was created automatically for interactive DM poll submissions, summaries, and exports. The bot will recreate it if it is ever deleted.',
+  })).catch(() => {});
+  return channel;
+}
+
+async function handleDmAllPoll(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const poll = findDmPoll(interaction.options.getString('poll', true));
+  if (!poll) return fail(interaction, 'Poll Not Found', 'I could not find that poll.');
+  normalizePollState(poll);
+  if (!poll.questions.length) return fail(interaction, 'No Questions', 'Add at least one question with `/dmquestion` before sending this poll.');
+  if (poll.status === 'closed') return fail(interaction, 'Poll Closed', 'This poll is closed. Create a new poll to send another questionnaire.');
+  const role = interaction.options.getRole('role');
+  const resultsChannel = await ensurePollResultsChannel(interaction.guild);
+
+  await interaction.reply(v2Payload({
+    title: 'DM Poll Broadcast Starting',
+    description: role ? `Sending **${escapeMassMentions(poll.title)}** to members with ${role}.` : `Sending **${escapeMassMentions(poll.title)}** to every non-bot member.`,
+    ephemeral: true,
+  }));
+
+  const members = await interaction.guild.members.fetch();
+  const targets = [...members.values()].filter(m => !m.user.bot && (!role || m.roles.cache.has(role.id)) && !poll.responses[m.id]);
+  if (!targets.length) return interaction.editReply(v2Edit({ title: 'No New Recipients', description: 'Every matching member has already received this poll, or there are no matching members.' }));
+
+  let sent = 0, failed = 0;
+  const queue = [...targets];
+  const workerCount = Math.min(3, Math.max(1, queue.length));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (queue.length) {
+      const member = queue.shift();
+      if (!member) break;
+      try {
+        await member.send(makePollStartPayload(poll));
+        poll.responses[member.id] = { deliveredAt: Date.now(), startedAt: null, answers: {}, submittedAt: null };
+        sent++;
+      } catch {
+        failed++;
+      }
+    }
+  }));
+
+  poll.status = 'active';
+  poll.sentAt ||= Date.now();
+  poll.broadcasts.push({ at: Date.now(), by: interaction.user.id, roleId: role?.id || null, attempted: targets.length, delivered: sent, failed });
+  saveState();
+  await updatePollSummaryMessage(poll, resultsChannel).catch(error => console.error('[DM POLL] Could not create summary:', error));
+  await logAction({
+    title: 'DM Poll Broadcast Complete',
+    description: `**${escapeMassMentions(poll.title)}** was broadcast to ${role ? `members with ${role}` : 'all non-bot members'}.`,
+    moderator: interaction.user,
+    extra: `Poll ID: \`${poll.id}\`\nDelivered: ${sent}\nFailed: ${failed}\nResults: ${resultsChannel}`,
+  });
+  return interaction.editReply(v2Edit({
+    title: 'DM Poll Broadcast Complete',
+    description: `**Poll:** ${escapeMassMentions(poll.title)}\n**Delivered:** ${sent}\n**Failed:** ${failed}\n**Attempted:** ${targets.length}\n**Private results:** ${resultsChannel}`,
+  }));
+}
+
+function pollAggregateText(poll) {
+  normalizePollState(poll);
+  const responses = Object.entries(poll.responses);
+  const submitted = responses.filter(([, r]) => r?.submittedAt);
+  const started = responses.filter(([, r]) => r?.startedAt).length;
+  const delivered = responses.length;
+  const lines = [
+    `**Poll ID:** \`${poll.id}\``,
+    `**Status:** ${poll.status}`,
+    `**Delivered:** ${delivered}`,
+    `**Started:** ${started}`,
+    `**Submitted:** ${submitted.length}`,
+    `**Completion Rate:** ${delivered ? ((submitted.length / delivered) * 100).toFixed(1) : '0.0'}%`,
+  ];
+  for (let i = 0; i < poll.questions.length; i++) {
+    const q = poll.questions[i];
+    const values = submitted.map(([, r]) => r.answers?.[q.id]?.value).filter(v => v !== undefined && v !== null && v !== '');
+    lines.push(`\n**Q${i + 1}. ${escapeMassMentions(q.text)}**`);
+    if (q.type === 'text') {
+      lines.push(`${values.length} written response(s)`);
+    } else {
+      const options = pollQuestionOptions(q);
+      for (const option of options) {
+        const count = values.reduce((n, value) => n + (Array.isArray(value) ? (value.includes(option) ? 1 : 0) : (value === option ? 1 : 0)), 0);
+        const pct = submitted.length ? ((count / submitted.length) * 100).toFixed(1) : '0.0';
+        lines.push(`${escapeMassMentions(option)}: **${count}** (${pct}%)`);
+      }
+    }
+  }
+  return truncate(lines.join('\n'), 3800);
+}
+
+async function updatePollSummaryMessage(poll, channel = null) {
+  channel ||= await ensurePollResultsChannel(await client.guilds.fetch(CONFIG.guildId));
+  const payload = v2Edit({ title: `Poll Summary - ${poll.title}`, description: pollAggregateText(poll) });
+  if (poll.summaryMessageId) {
+    const existing = await channel.messages.fetch(poll.summaryMessageId).catch(() => null);
+    if (existing) {
+      await existing.edit(payload);
+      return existing;
+    }
+  }
+  const message = await channel.send({ ...payload, flags: MessageFlags.IsComponentsV2 });
+  poll.summaryMessageId = message.id;
+  saveState();
+  return message;
+}
+
+async function postPollSubmission(poll, user, response) {
+  const guild = await client.guilds.fetch(CONFIG.guildId);
+  const channel = await ensurePollResultsChannel(guild);
+  const answerLines = poll.questions.map((q, i) => {
+    const answer = response.answers?.[q.id];
+    return `**${i + 1}. ${escapeMassMentions(q.text)}**\n${truncate(escapeMassMentions(formatPollAnswer(answer?.value)), 700)}`;
+  }).join('\n\n');
+  await channel.send(v2Payload({
+    title: `Poll Response - ${poll.title}`,
+    description: `**User:** <@${user.id}> (\`${user.id}\`)\n**Submitted:** <t:${Math.floor(response.submittedAt / 1000)}:F>\n\n${truncate(answerLines, 3000)}`,
+  }));
+}
+
+async function handleDmPollResults(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const poll = findDmPoll(interaction.options.getString('poll', true));
+  if (!poll) return fail(interaction, 'Poll Not Found', 'I could not find that poll.');
+  const channel = await ensurePollResultsChannel(interaction.guild);
+  await channel.send(v2Payload({ title: `Poll Results - ${poll.title}`, description: pollAggregateText(poll) }));
+  return interaction.reply(v2Payload({ title: 'Poll Results Posted', description: `The latest aggregate data was posted privately in ${channel}.`, ephemeral: true }));
+}
+
+function csvCell(value) {
+  let text = String(value ?? '').replace(/\r?\n/g, ' ');
+  // Prevent spreadsheet apps from interpreting member-written responses as formulas.
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function buildPollCsv(poll) {
+  const header = ['user_id', 'submitted_at', ...poll.questions.map((q, i) => `Q${i + 1}: ${q.text}`)];
+  const rows = [header.map(csvCell).join(',')];
+  for (const [userId, response] of Object.entries(poll.responses || {})) {
+    if (!response?.submittedAt) continue;
+    const row = [userId, new Date(response.submittedAt).toISOString()];
+    for (const q of poll.questions) row.push(formatPollAnswer(response.answers?.[q.id]?.value));
+    rows.push(row.map(csvCell).join(','));
+  }
+  return Buffer.from(rows.join('\n'), 'utf8');
+}
+
+async function handleDmPollExport(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const poll = findDmPoll(interaction.options.getString('poll', true));
+  if (!poll) return fail(interaction, 'Poll Not Found', 'I could not find that poll.');
+  const channel = await ensurePollResultsChannel(interaction.guild);
+  const file = new AttachmentBuilder(buildPollCsv(poll), { name: `poll-${poll.id}-responses.csv` });
+  await channel.send({
+    components: [new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(`# Poll Export - ${escapeMassMentions(poll.title)}\nFull submitted response data for poll \`${poll.id}\`.`))],
+    files: [file], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] },
+  });
+  return interaction.reply(v2Payload({ title: 'Poll Export Ready', description: `The CSV was posted privately in ${channel}.`, ephemeral: true }));
+}
+
+async function handleDmPollClose(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const poll = findDmPoll(interaction.options.getString('poll', true));
+  if (!poll) return fail(interaction, 'Poll Not Found', 'I could not find that poll.');
+  poll.status = 'closed';
+  poll.closedAt = Date.now();
+  poll.closedBy = interaction.user.id;
+  saveState();
+  const channel = await ensurePollResultsChannel(interaction.guild);
+  await updatePollSummaryMessage(poll, channel).catch(() => {});
+  return interaction.reply(v2Payload({ title: 'Poll Closed', description: `**${escapeMassMentions(poll.title)}** is now closed. Existing DM buttons will no longer accept answers.`, ephemeral: true }));
 }
 
 async function handleDmAll(interaction) {
@@ -2353,7 +3250,7 @@ function stripEphemeralFlag(payload) {
 
 function loadState() {
   const defaults = {
-    version: 4,
+    version: 5,
     nextBaptismAt: null,
     lockdown: { active: false, channels: {} },
     warnings: {},
@@ -2364,6 +3261,8 @@ function loadState() {
     recentJoins: [],
     memberActivity: { trackingSince: Date.now(), events: [] },
     censorWarnCooldowns: {},
+    dmPolls: {},
+    pollResultsChannelId: null,
   };
 
   if (!fs.existsSync(STATE_FILE)) return defaults;
@@ -2386,6 +3285,8 @@ function loadState() {
           }
         : defaults.memberActivity,
       censorWarnCooldowns: parsed.censorWarnCooldowns && typeof parsed.censorWarnCooldowns === 'object' ? parsed.censorWarnCooldowns : {},
+      dmPolls: parsed.dmPolls && typeof parsed.dmPolls === 'object' ? parsed.dmPolls : {},
+      pollResultsChannelId: parsed.pollResultsChannelId || null,
       lockdown: parsed.lockdown || defaults.lockdown,
     };
   } catch (error) {
