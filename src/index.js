@@ -3989,22 +3989,66 @@ function normalizeFaqState(value, defaults) {
 
 async function ensureFaqChannel(guild) {
   state.faq ||= { channelId: null, messageId: null, items: [] };
+
+  const customerRole = guild.roles.cache.get(CONFIG.customerRoleId) || await guild.roles.fetch(CONFIG.customerRoleId).catch(() => null);
+  if (!customerRole) throw new Error(`Customer role ${CONFIG.customerRoleId} could not be found.`);
+
+  const botMember = guild.members.me || await guild.members.fetchMe();
+
   let channel = state.faq.channelId ? guild.channels.cache.get(state.faq.channelId) : null;
   channel ||= guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === FAQ_CHANNEL_NAME) || null;
+
+  const readOnlyDeny = [
+    PermissionFlagsBits.SendMessages,
+    PermissionFlagsBits.CreatePublicThreads,
+    PermissionFlagsBits.CreatePrivateThreads,
+    PermissionFlagsBits.SendMessagesInThreads,
+    PermissionFlagsBits.AddReactions,
+  ];
+
+  const overwrites = [
+    {
+      id: guild.roles.everyone.id,
+      type: OverwriteType.Role,
+      deny: [PermissionFlagsBits.ViewChannel, ...readOnlyDeny],
+    },
+    {
+      id: customerRole.id,
+      type: OverwriteType.Role,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+      deny: readOnlyDeny,
+    },
+    {
+      id: botMember.id,
+      type: OverwriteType.Member,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ManageMessages,
+        PermissionFlagsBits.ManageChannels,
+      ],
+    },
+  ];
+
   if (!channel) {
     channel = await guild.channels.create({
       name: FAQ_CHANNEL_NAME,
       type: ChannelType.GuildText,
       topic: 'Frequently asked questions and a direct link to Bloxburg Store support tickets.',
-      permissionOverwrites: [
-        { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages] },
-        { id: guild.members.me.id, type: OverwriteType.Member, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages] },
-      ],
-      reason: 'Auto-created FAQ channel',
+      permissionOverwrites: overwrites,
+      reason: 'Auto-created Customer-only FAQ channel',
     });
   } else {
-    await channel.permissionOverwrites.edit(guild.roles.everyone.id, { ViewChannel: true, ReadMessageHistory: true, SendMessages: false }, { reason: 'FAQ is read-only' }).catch(() => {});
+    // Replace the overwrite set instead of layering more permissions on top.
+    // This removes old role-specific ViewChannel grants that could expose the FAQ
+    // to non-Customer roles after a restart or category permission change.
+    await channel.permissionOverwrites.set(overwrites, 'Enforce Customer-only read-only FAQ permissions');
+    if (channel.topic !== 'Frequently asked questions and a direct link to Bloxburg Store support tickets.') {
+      await channel.setTopic('Frequently asked questions and a direct link to Bloxburg Store support tickets.', 'Keep FAQ channel topic in sync').catch(() => {});
+    }
   }
+
   state.faq.channelId = channel.id;
   saveState();
   return channel;
@@ -4026,14 +4070,62 @@ function makeFaqPayload() {
   return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
 }
 
+function isFaqPanelMessage(message) {
+  if (!message || message.author?.id !== client.user?.id) return false;
+  try {
+    const serialized = JSON.stringify(message.components?.map(component => component.toJSON?.() ?? component) || []);
+    return serialized.includes('Bloxburg Store FAQ') || serialized.includes(SUPPORT_TICKETS_URL);
+  } catch {
+    return false;
+  }
+}
+
+async function findFaqPanelMessages(channel) {
+  const found = [];
+  let before;
+
+  // The FAQ channel should contain only the bot panel, but scan a few pages so
+  // older duplicates from previous deployments are also cleaned up.
+  for (let page = 0; page < 3; page += 1) {
+    const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch(() => null);
+    if (!batch?.size) break;
+    for (const message of batch.values()) {
+      if (isFaqPanelMessage(message)) found.push(message);
+    }
+    before = batch.last()?.id;
+    if (batch.size < 100) break;
+  }
+
+  return found.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+}
+
 async function refreshFaqMessage(guild) {
   const channel = await ensureFaqChannel(guild);
+  const candidates = await findFaqPanelMessages(channel);
+
   let msg = state.faq.messageId ? await channel.messages.fetch(state.faq.messageId).catch(() => null) : null;
+  if (!isFaqPanelMessage(msg)) msg = null;
+
+  // If state.json was reset on a deploy, recover the existing panel instead of
+  // blindly sending a new one. Prefer the oldest surviving panel so its position
+  // in the channel stays stable.
+  if (!msg && candidates.length) msg = candidates[0];
+
   if (!msg) {
     msg = await channel.send(makeFaqPayload());
-    state.faq.messageId = msg.id;
-    saveState();
-  } else await msg.edit(makeFaqPayload());
+  } else {
+    await msg.edit(makeFaqPayload());
+  }
+
+  // Remove any duplicate FAQ panels left by older restarts/deployments.
+  const duplicates = candidates.filter(candidate => candidate.id !== msg.id);
+  if (duplicates.length) {
+    await Promise.allSettled(duplicates.map(candidate => candidate.delete()));
+    console.log(`[FAQ] Removed ${duplicates.length} duplicate FAQ panel(s) from #${channel.name}.`);
+  }
+
+  state.faq.messageId = msg.id;
+  saveState();
   return { channel, msg };
 }
 

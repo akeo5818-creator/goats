@@ -84,7 +84,7 @@ Members with closed DMs are counted as failed deliveries rather than stopping th
 
 The bot automatically creates a customer-only `#pvp-tournaments` channel and a cosmetic `Champion` role with no permissions. `@everyone` cannot see the tournament channel; the configured Customer role can view it. Customer chat is locked while no tournament is running, opens when registration begins, and locks again when the tournament finishes or is cancelled.
 
-Games included in v2.3:
+Games included in v2.4:
 - **Tic-Tac-Toe** - real 3x3 Discord button board, turn enforcement, automatic draw rematches and round advancement.
 - **Rock Paper Scissors** - private hidden choices until both players lock in, tie rematches and automatic round advancement.
 
@@ -242,9 +242,16 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 
 `/censoradd` accepts multiple words at once. Each space/comma-separated censor entry becomes its own trigger word. If any trigger appears in a non-bot message anywhere in the server, the whole message is deleted. Existing older multi-word censor entries are automatically split into individual trigger words when state is loaded.
 
-## v2.3 changes
+## v2.4 changes
 
 - Keeps every v2.2 tournament, chat-drop, FAQ, moderation, analytics and poll feature.
 - Tournament panels and winners now use `<a:Trophy_fixed:1545550040628461588>` as the trophy emoji.
 - Removes the old 32-player tournament cap completely. Every eligible customer who joins during the registration window is entered into the bracket.
 - Odd player counts continue to use automatic byes so brackets work with any signup count of 2 or more.
+
+
+## Customer-only FAQ hardening (v2.4)
+- `#faq` is visible to the configured Customer role only (Administrators still bypass Discord channel denies).
+- Customers can read history but cannot send messages, react, create threads, or send in threads.
+- Existing role-specific FAQ overwrites are replaced so old View Channel grants do not leak access.
+- The bot discovers and edits the existing FAQ V2 panel after restarts, and automatically deletes duplicate FAQ panels instead of reposting them.
