@@ -80,6 +80,50 @@ Join/leave analytics begin when v1.8+ first starts; Discord does not provide his
 Members with closed DMs are counted as failed deliveries rather than stopping the broadcast. The bot uses a small worker pool instead of launching every DM request at once.
 
 
+## PvP tournaments
+
+The bot automatically creates a customer-only `#pvp-tournaments` channel and a cosmetic `Champion` role with no permissions. `@everyone` cannot see the tournament channel; the configured Customer role can view it. Customer chat is locked while no tournament is running, opens when registration begins, and locks again when the tournament finishes or is cancelled.
+
+Games included in v2.2:
+- **Tic-Tac-Toe** - real 3x3 Discord button board, turn enforcement, automatic draw rematches and round advancement.
+- **Rock Paper Scissors** - private hidden choices until both players lock in, tie rematches and automatic round advancement.
+
+Tournament commands:
+- `/tournamentsetup [channel_name]` - create/repair the channel and Champion role.
+- `/tournamentprize game prize` - save the normal prize text for each game.
+- `/tournamentdaily enabled [time] [game]` - enable/disable the daily tournament and choose `HH:MM`, one game, or rotating games. Default is **19:00 Pacific/Auckland** with game rotation.
+- `/tournamentstart game [prize] [registration_minutes]` - manually open registration now.
+- `/tournamentbegin` - close registration and start the bracket immediately.
+- `/tournamentstatus` - show configuration/current round.
+- `/tournamentcancel` - stop the active tournament and lock chat.
+
+Daily/manual tournaments use a registration stage, then automatically generate round matchups until one player remains. The winner receives the cosmetic **Champion** role and a V2 winner panel with a **Claim Prize** button linking to the support-ticket channel.
+
+## Random chat drops
+
+Chat drops are **disabled by default** and do not start until an administrator runs `/chatdrops start`. Once enabled, the bot schedules one cash drop at a random local time each day. Every generated amount is below **1,000,000 Bloxburg Cash**, and the first member to click the claim button wins.
+
+Commands:
+- `/chatdrops start [channel] [minimum] [maximum]` - enable the daily random drop system.
+- `/chatdrops stop` - stop future automatic drops.
+- `/chatdrops status` - show the configured range and exact next scheduled time privately to staff.
+- `/chatdrops now [channel] [amount]` - send a drop immediately.
+
+The winning panel links to the same support-ticket channel for prize fulfilment.
+
+## FAQ channel
+
+The bot automatically creates a read-only `#faq` channel and maintains one live Components V2 FAQ panel with a **Make a Support Ticket** link button to `1537689865267974190`.
+
+Commands:
+- `/faqadd question answer`
+- `/faqedit number [question] [answer]`
+- `/faqremove number`
+- `/faqlist`
+- `/faqrefresh`
+
+The V2 FAQ panel supports up to 9 saved entries so every answer remains within Discord Components V2 limits.
+
 ### Interactive DM polls
 The bot can create multi-question surveys and DM them to the whole server or only one role. Members receive one clean Components V2 poll DM with a **Start Poll** button, then move through the questions interactively.
 
@@ -179,6 +223,7 @@ Give the bot the following where appropriate:
 - Kick Members
 - Ban Members
 - Manage Nicknames
+- Manage Roles (to create/award the cosmetic Champion role)
 
 For lockdowns, ensure the bot can edit the Customer role permission overwrites. For moderation actions, its highest role must be above the target member's highest role.
 
@@ -197,9 +242,10 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 
 `/censoradd` accepts multiple words at once. Each space/comma-separated censor entry becomes its own trigger word. If any trigger appears in a non-bot message anywhere in the server, the whole message is deleted. Existing older multi-word censor entries are automatically split into individual trigger words when state is loaded.
 
-## v2.1 changes
+## v2.2 changes
 
-- The private `dm-poll-results` channel is created automatically at startup, before any poll is sent.
-- If that results channel is deleted, the bot recreates it automatically and stores the replacement ID.
-- `/servergraph` now renders totals, net growth, peak activity, y-axis values, date labels, and numeric join/leave values directly on the PNG.
-- The graph remains dependency-free, so Railway does not need native canvas packages.
+- Keeps the v2.1 auto-created poll-results channel and richer numbered `/servergraph`.
+- Adds auto-created customer-only PvP tournaments with real Tic-Tac-Toe and Rock Paper Scissors brackets.
+- Adds configurable daily/manual tournament prizes and the cosmetic Champion role.
+- Adds opt-in random daily cash drops under 1,000,000 with first-click claiming.
+- Adds an auto-created read-only FAQ channel with live command-managed Q&A and a support-ticket link button.

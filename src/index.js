@@ -46,6 +46,7 @@ const CONFIG = {
   pollResultsChannelId: process.env.POLL_RESULTS_CHANNEL_ID || null,
   adminAlertRoleId: process.env.ADMIN_ALERT_ROLE_ID || null,
   altAlertThreshold: clampNumber(Number(process.env.ALT_ALERT_THRESHOLD || 40), 20, 100, 40),
+  timeZone: process.env.SERVER_TIME_ZONE || 'Pacific/Auckland',
 };
 
 const EMOJIS = {
@@ -54,6 +55,13 @@ const EMOJIS = {
 };
 
 const BAPTISM_TEXT = `Chat has been baptized once again ${EMOJIS.thumbsUpTom}`;
+const SUPPORT_TICKETS_URL = 'https://discord.com/channels/1537689864827445278/1537689865267974190';
+const TOURNAMENT_CHANNEL_NAME = 'pvp-tournaments';
+const FAQ_CHANNEL_NAME = 'faq';
+const CHAMPION_ROLE_NAME = 'Champion';
+const TOURNAMENT_REGISTRATION_MINUTES = 10;
+const MAX_TOURNAMENT_PLAYERS = 32;
+const CHAT_DROP_MAX = 999_999;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
 const STATUS_ROTATION_INTERVAL_MS = 20_000;
@@ -331,6 +339,108 @@ const commands = [
     .setDescription('Show information and uptime for this moderation bot.'),
 
   new SlashCommandBuilder()
+    .setName('tournamentsetup')
+    .setDescription('Create or repair the customer-only PvP tournament channel and Champion role.')
+    .addStringOption(o => o.setName('channel_name').setDescription('Optional tournament channel name.').setMinLength(2).setMaxLength(80))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('tournamentprize')
+    .setDescription('Set the prize shown for a PvP tournament game.')
+    .addStringOption(o => o.setName('game').setDescription('Game to configure.').setRequired(true).addChoices(
+      { name: 'Tic-Tac-Toe', value: 'tictactoe' },
+      { name: 'Rock Paper Scissors', value: 'rps' },
+    ))
+    .addStringOption(o => o.setName('prize').setDescription('Prize text, e.g. 500,000 Bloxburg Cash.').setRequired(true).setMinLength(1).setMaxLength(200))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('tournamentdaily')
+    .setDescription('Configure the automatic daily PvP tournament.')
+    .addBooleanOption(o => o.setName('enabled').setDescription('Turn the daily tournament on or off.').setRequired(true))
+    .addStringOption(o => o.setName('time').setDescription('Local time in HH:MM, e.g. 19:00.').setMinLength(5).setMaxLength(5))
+    .addStringOption(o => o.setName('game').setDescription('Daily game or rotate between games.').addChoices(
+      { name: 'Rotate Games', value: 'rotate' },
+      { name: 'Tic-Tac-Toe', value: 'tictactoe' },
+      { name: 'Rock Paper Scissors', value: 'rps' },
+    ))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('tournamentstart')
+    .setDescription('Open registration for a PvP tournament now.')
+    .addStringOption(o => o.setName('game').setDescription('Tournament game.').setRequired(true).addChoices(
+      { name: 'Tic-Tac-Toe', value: 'tictactoe' },
+      { name: 'Rock Paper Scissors', value: 'rps' },
+    ))
+    .addStringOption(o => o.setName('prize').setDescription('Optional one-time prize override.').setMaxLength(200))
+    .addIntegerOption(o => o.setName('registration_minutes').setDescription('Registration window.').setMinValue(1).setMaxValue(60))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('tournamentbegin')
+    .setDescription('Close tournament registration and begin the bracket immediately.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('tournamentstatus')
+    .setDescription('Show the daily tournament configuration and current tournament status.'),
+
+  new SlashCommandBuilder()
+    .setName('tournamentcancel')
+    .setDescription('Cancel the current tournament and close tournament chat.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('chatdrops')
+    .setDescription('Manage random daily Bloxburg cash drops.')
+    .addSubcommand(s => s
+      .setName('start')
+      .setDescription('Enable one random cash drop per day.')
+      .addChannelOption(o => o.setName('channel').setDescription('Channel for drops. Defaults to this channel.').addChannelTypes(ChannelType.GuildText))
+      .addIntegerOption(o => o.setName('minimum').setDescription('Minimum cash amount.').setMinValue(1).setMaxValue(CHAT_DROP_MAX))
+      .addIntegerOption(o => o.setName('maximum').setDescription('Maximum cash amount. Must stay under 1,000,000.').setMinValue(1).setMaxValue(CHAT_DROP_MAX)))
+    .addSubcommand(s => s.setName('stop').setDescription('Disable automatic daily cash drops.'))
+    .addSubcommand(s => s.setName('status').setDescription('Show the current chat-drop configuration.'))
+    .addSubcommand(s => s
+      .setName('now')
+      .setDescription('Send a cash drop immediately.')
+      .addChannelOption(o => o.setName('channel').setDescription('Channel for this drop. Defaults to configured/current channel.').addChannelTypes(ChannelType.GuildText))
+      .addIntegerOption(o => o.setName('amount').setDescription('Exact amount, otherwise a configured random amount.').setMinValue(1).setMaxValue(CHAT_DROP_MAX)))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('faqadd')
+    .setDescription('Add a question and answer to the auto-created FAQ channel.')
+    .addStringOption(o => o.setName('question').setDescription('FAQ question.').setRequired(true).setMinLength(2).setMaxLength(250))
+    .addStringOption(o => o.setName('answer').setDescription('FAQ answer.').setRequired(true).setMinLength(1).setMaxLength(1200))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('faqedit')
+    .setDescription('Edit an existing FAQ question or answer.')
+    .addIntegerOption(o => o.setName('number').setDescription('FAQ number.').setRequired(true).setMinValue(1).setMaxValue(50))
+    .addStringOption(o => o.setName('question').setDescription('New question text.').setMinLength(2).setMaxLength(250))
+    .addStringOption(o => o.setName('answer').setDescription('New answer text.').setMinLength(1).setMaxLength(1200))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('faqremove')
+    .setDescription('Remove a question from the FAQ channel.')
+    .addIntegerOption(o => o.setName('number').setDescription('FAQ number to remove.').setRequired(true).setMinValue(1).setMaxValue(50))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('faqlist')
+    .setDescription('List the saved FAQ entries.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('faqrefresh')
+    .setDescription('Rebuild the public FAQ message and ticket button.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('dmpollcreate')
     .setDescription('Create a saved DM poll draft.')
     .addStringOption(o => o.setName('name').setDescription('Short internal poll name.').setRequired(true).setMinLength(2).setMaxLength(40))
@@ -449,6 +559,24 @@ client.once('ready', async () => {
   } catch (error) {
     console.error('[DM POLL] Could not prepare the private results channel:', error);
   }
+
+  try {
+    const guild = await client.guilds.fetch(CONFIG.guildId);
+    const { channel, role } = await ensureTournamentInfrastructure(guild);
+    await setTournamentChatEnabled(channel, Boolean(state.tournaments?.active && ['registration', 'running'].includes(state.tournaments.active.status)));
+    console.log(`[TOURNAMENT] Ready: #${channel.name} | ${role.name}`);
+    await ensureFaqChannel(guild);
+    await refreshFaqMessage(guild);
+  } catch (error) {
+    console.error('[SETUP] Tournament/FAQ auto-setup failed:', error);
+  }
+
+  ensureTournamentSchedule();
+  if (state.chatDrops?.enabled && !state.chatDrops.nextDropAt) scheduleNextChatDrop(false);
+  setInterval(checkTournamentSchedule, 15_000).unref();
+  setInterval(checkChatDrops, 30_000).unref();
+  await checkTournamentSchedule();
+  await checkChatDrops();
 });
 
 function startStatusRotator() {
@@ -497,6 +625,32 @@ client.on('channelCreate', async channel => {
 
 client.on('channelDelete', async channel => {
   if (channel.guild?.id !== CONFIG.guildId) return;
+
+  const wasTournament = channel.id === state.tournaments?.channelId;
+  const wasFaq = channel.id === state.faq?.channelId;
+  if (wasTournament) {
+    state.tournaments.channelId = null;
+    saveState();
+    setTimeout(async () => {
+      try {
+        const guild = await client.guilds.fetch(CONFIG.guildId);
+        await ensureTournamentInfrastructure(guild);
+      } catch (error) { console.error('[TOURNAMENT] Failed to recreate deleted tournament channel:', error); }
+    }, 1500).unref();
+  }
+  if (wasFaq) {
+    state.faq.channelId = null;
+    state.faq.messageId = null;
+    saveState();
+    setTimeout(async () => {
+      try {
+        const guild = await client.guilds.fetch(CONFIG.guildId);
+        await ensureFaqChannel(guild);
+        await refreshFaqMessage(guild);
+      } catch (error) { console.error('[FAQ] Failed to recreate deleted FAQ channel:', error); }
+    }, 1500).unref();
+  }
+
   const wasPollResults = channel.id === state.pollResultsChannelId || channel.id === CONFIG.pollResultsChannelId;
   if (!wasPollResults) return;
 
@@ -580,6 +734,8 @@ client.on('interactionCreate', async interaction => {
   try {
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('dmpoll:')) return handleDmPollButton(interaction);
+      if (interaction.customId.startsWith('tour:')) return handleTournamentButton(interaction);
+      if (interaction.customId.startsWith('chatdrop:')) return handleChatDropButton(interaction);
       return;
     }
     if (interaction.isStringSelectMenu()) {
@@ -631,6 +787,19 @@ client.on('interactionCreate', async interaction => {
       case 'servericon': return handleServerIcon(interaction);
       case 'ping': return handlePing(interaction);
       case 'botinfo': return handleBotInfo(interaction);
+      case 'tournamentsetup': return handleTournamentSetup(interaction);
+      case 'tournamentprize': return handleTournamentPrize(interaction);
+      case 'tournamentdaily': return handleTournamentDaily(interaction);
+      case 'tournamentstart': return handleTournamentStart(interaction);
+      case 'tournamentbegin': return handleTournamentBegin(interaction);
+      case 'tournamentstatus': return handleTournamentStatus(interaction);
+      case 'tournamentcancel': return handleTournamentCancel(interaction);
+      case 'chatdrops': return handleChatDrops(interaction);
+      case 'faqadd': return handleFaqAdd(interaction);
+      case 'faqedit': return handleFaqEdit(interaction);
+      case 'faqremove': return handleFaqRemove(interaction);
+      case 'faqlist': return handleFaqList(interaction);
+      case 'faqrefresh': return handleFaqRefresh(interaction);
       case 'dmpollcreate': return handleDmPollCreate(interaction);
       case 'dmquestion': return handleDmQuestion(interaction);
       case 'dmquestionremove': return handleDmQuestionRemove(interaction);
@@ -3158,6 +3327,767 @@ function escapeMarkdownLinkText(text) {
   return String(text || '').replace(/([\\\[\]])/g, '\\$1').replace(/\n/g, ' ');
 }
 
+
+// ---------- TOURNAMENTS ----------
+
+function normalizeTournamentState(value, defaults) {
+  const source = value && typeof value === 'object' ? value : {};
+  const daily = source.daily && typeof source.daily === 'object' ? source.daily : {};
+  return {
+    ...defaults,
+    ...source,
+    prizes: { ...defaults.prizes, ...(source.prizes || {}) },
+    daily: { ...defaults.daily, ...daily },
+    active: source.active && typeof source.active === 'object' ? source.active : null,
+  };
+}
+
+function tournamentGameName(game) {
+  return game === 'rps' ? 'Rock Paper Scissors' : 'Tic-Tac-Toe';
+}
+
+function tournamentGameEmoji(game) {
+  return game === 'rps' ? '🪨 📄 ✂️' : '❌ ⭕';
+}
+
+async function ensureTournamentInfrastructure(guild) {
+  state.tournaments ||= normalizeTournamentState(null, {
+    channelId: null, championRoleId: null, channelName: TOURNAMENT_CHANNEL_NAME,
+    prizes: { tictactoe: 'To be announced', rps: 'To be announced' },
+    daily: { enabled: true, time: '19:00', game: 'rotate', nextAt: null, rotationIndex: 0 }, active: null,
+  });
+
+  let role = state.tournaments.championRoleId ? guild.roles.cache.get(state.tournaments.championRoleId) : null;
+  role ||= guild.roles.cache.find(r => r.name === CHAMPION_ROLE_NAME) || null;
+  if (!role) {
+    role = await guild.roles.create({
+      name: CHAMPION_ROLE_NAME,
+      color: 0xF1C40F,
+      hoist: false,
+      mentionable: false,
+      permissions: [],
+      reason: 'Auto-created cosmetic tournament champion role',
+    });
+  }
+  state.tournaments.championRoleId = role.id;
+
+  let channel = state.tournaments.channelId ? guild.channels.cache.get(state.tournaments.channelId) : null;
+  const wantedName = String(state.tournaments.channelName || TOURNAMENT_CHANNEL_NAME).toLowerCase().replace(/[^a-z0-9-_]/g, '-').replace(/-+/g, '-').slice(0, 80) || TOURNAMENT_CHANNEL_NAME;
+  channel ||= guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === wantedName) || null;
+  if (!channel) {
+    channel = await guild.channels.create({
+      name: wantedName,
+      type: ChannelType.GuildText,
+      topic: 'Daily customer PvP tournaments, brackets, prizes and champions.',
+      permissionOverwrites: [
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: CONFIG.customerRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages] },
+        { id: guild.members.me.id, type: OverwriteType.Member, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages, PermissionFlagsBits.ReadMessageHistory] },
+      ],
+      reason: 'Auto-created PvP tournament channel',
+    });
+  } else {
+    await channel.permissionOverwrites.edit(guild.roles.everyone.id, { ViewChannel: false }, { reason: 'Tournament channel privacy' }).catch(() => {});
+    await channel.permissionOverwrites.edit(CONFIG.customerRoleId, { ViewChannel: true, ReadMessageHistory: true }, { reason: 'Tournament customer access' }).catch(() => {});
+  }
+  state.tournaments.channelId = channel.id;
+  saveState();
+  return { channel, role };
+}
+
+async function setTournamentChatEnabled(channel, enabled) {
+  if (!channel?.permissionOverwrites) return;
+  await channel.permissionOverwrites.edit(CONFIG.customerRoleId, {
+    ViewChannel: true,
+    ReadMessageHistory: true,
+    SendMessages: Boolean(enabled),
+  }, { reason: enabled ? 'PvP tournament active' : 'PvP tournament inactive' }).catch(error => console.error('[TOURNAMENT] Chat permission update failed:', error));
+}
+
+function parseClockTime(value) {
+  const match = String(value || '').trim().match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  return match ? { hour: Number(match[1]), minute: Number(match[2]) } : null;
+}
+
+function zonedParts(timestamp, timeZone = CONFIG.timeZone) {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(new Date(timestamp)).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+  return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day), hour: Number(parts.hour), minute: Number(parts.minute), second: Number(parts.second) };
+}
+
+function timeZoneOffsetMs(timestamp, timeZone = CONFIG.timeZone) {
+  const p = zonedParts(timestamp, timeZone);
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Math.floor(timestamp / 1000) * 1000;
+}
+
+function zonedDateTimeToUtcMs(year, month, day, hour, minute, timeZone = CONFIG.timeZone) {
+  const guess = Date.UTC(year, month - 1, day, hour, minute, 0);
+  let candidate = guess - timeZoneOffsetMs(guess, timeZone);
+  candidate = guess - timeZoneOffsetMs(candidate, timeZone);
+  return candidate;
+}
+
+function addLocalDays(parts, days) {
+  const d = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days, 12, 0, 0));
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+}
+
+function nextDailyTimeTimestamp(clock, timeZone = CONFIG.timeZone, from = Date.now()) {
+  const parsed = parseClockTime(clock) || { hour: 19, minute: 0 };
+  const nowParts = zonedParts(from, timeZone);
+  let candidate = zonedDateTimeToUtcMs(nowParts.year, nowParts.month, nowParts.day, parsed.hour, parsed.minute, timeZone);
+  if (candidate <= from + 30_000) {
+    const tomorrow = addLocalDays(nowParts, 1);
+    candidate = zonedDateTimeToUtcMs(tomorrow.year, tomorrow.month, tomorrow.day, parsed.hour, parsed.minute, timeZone);
+  }
+  return candidate;
+}
+
+function ensureTournamentSchedule() {
+  const daily = state.tournaments?.daily;
+  if (!daily?.enabled) return;
+  if (!daily.nextAt || daily.nextAt <= Date.now() - 6 * 60 * 60 * 1000) {
+    daily.nextAt = nextDailyTimeTimestamp(daily.time || '19:00');
+    saveState();
+  }
+}
+
+function chooseDailyTournamentGame() {
+  const daily = state.tournaments.daily;
+  if (daily.game === 'tictactoe' || daily.game === 'rps') return daily.game;
+  const games = ['tictactoe', 'rps'];
+  const game = games[Number(daily.rotationIndex || 0) % games.length];
+  daily.rotationIndex = (Number(daily.rotationIndex || 0) + 1) % games.length;
+  return game;
+}
+
+async function checkTournamentSchedule() {
+  const guild = client.guilds.cache.get(CONFIG.guildId);
+  if (!guild) return;
+  const active = state.tournaments?.active;
+  if (active?.status === 'registration' && active.registrationClosesAt && Date.now() >= active.registrationClosesAt && !active.transitioning) {
+    await beginTournamentBracket(guild).catch(error => console.error('[TOURNAMENT] Auto-begin failed:', error));
+  }
+
+  const daily = state.tournaments?.daily;
+  if (!daily?.enabled) return;
+  ensureTournamentSchedule();
+  if (daily.nextAt && Date.now() >= daily.nextAt) {
+    daily.nextAt = nextDailyTimeTimestamp(daily.time || '19:00', CONFIG.timeZone, Date.now() + 60_000);
+    saveState();
+    if (!state.tournaments.active || state.tournaments.active.status === 'finished' || state.tournaments.active.status === 'cancelled') {
+      const game = chooseDailyTournamentGame();
+      await startTournamentRegistration(guild, game, state.tournaments.prizes?.[game] || 'To be announced', TOURNAMENT_REGISTRATION_MINUTES, 'Daily tournament');
+    }
+  }
+}
+
+function makeTournamentRegistrationPayload(active) {
+  const participants = active.participants || [];
+  const names = participants.slice(0, 20).map((id, i) => `${i + 1}. <@${id}>`).join('\n') || '*Nobody has joined yet.*';
+  const more = participants.length > 20 ? `\n...and ${participants.length - 20} more` : '';
+  const container = new ContainerBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      `# 🏆 ${tournamentGameName(active.game)} Tournament\n` +
+      `${tournamentGameEmoji(active.game)} **Registration is OPEN**\n\n` +
+      `**Prize**\n${escapeMassMentions(active.prize)}\n\n` +
+      `**Players** ${participants.length}/${MAX_TOURNAMENT_PLAYERS}\n${names}${more}\n\n` +
+      `Registration closes <t:${Math.floor(active.registrationClosesAt / 1000)}:R>.\n` +
+      `-# Customer chat is open while the tournament is active. Winners receive the cosmetic Champion role and claim prizes through Support.`
+    )
+  );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`tour:join:${active.id}`).setLabel('Join Tournament').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`tour:leave:${active.id}`).setLabel('Leave Tournament').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setLabel('Prize Support').setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL),
+  );
+  return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+}
+
+async function startTournamentRegistration(guild, game, prize, registrationMinutes = TOURNAMENT_REGISTRATION_MINUTES, source = 'Manual tournament') {
+  if (state.tournaments?.active && ['registration', 'running'].includes(state.tournaments.active.status)) throw new Error('A tournament is already active.');
+  const { channel } = await ensureTournamentInfrastructure(guild);
+  await setTournamentChatEnabled(channel, true);
+  const active = {
+    id: makeId(), game, prize: String(prize || 'To be announced'), status: 'registration', source,
+    participants: [], round: 0, currentMatchIds: [], matches: {}, roundByeUserId: null,
+    createdAt: Date.now(), registrationClosesAt: Date.now() + clampNumber(Number(registrationMinutes || 10), 1, 60, 10) * 60_000,
+    announcementMessageId: null, transitioning: false,
+  };
+  state.tournaments.active = active;
+  saveState();
+  const msg = await channel.send(makeTournamentRegistrationPayload(active));
+  active.announcementMessageId = msg.id;
+  saveState();
+  await channel.send(v2Payload({
+    title: '⚔️ Tournament Chat Open',
+    description: `The **${tournamentGameName(game)}** tournament has started. Customers can chat here until the tournament ends.\n\nJoin above before registration closes.`,
+  }));
+  return active;
+}
+
+async function updateTournamentRegistrationMessage(guild, active) {
+  const channel = guild.channels.cache.get(state.tournaments.channelId);
+  if (!channel?.isTextBased() || !active?.announcementMessageId) return;
+  const msg = await channel.messages.fetch(active.announcementMessageId).catch(() => null);
+  if (msg) await msg.edit(makeTournamentRegistrationPayload(active)).catch(() => {});
+}
+
+function shuffled(values) {
+  const out = [...values];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+async function beginTournamentBracket(guild) {
+  const active = state.tournaments?.active;
+  if (!active || active.status !== 'registration' || active.transitioning) return;
+  active.transitioning = true;
+  saveState();
+  const channel = guild.channels.cache.get(state.tournaments.channelId) || (await ensureTournamentInfrastructure(guild)).channel;
+  if ((active.participants || []).length < 2) {
+    active.status = 'cancelled';
+    active.transitioning = false;
+    saveState();
+    await setTournamentChatEnabled(channel, false);
+    await channel.send(v2Payload({ title: 'Tournament Cancelled', description: 'At least **2 players** are required. Registration closed without enough players.' }));
+    return;
+  }
+  active.status = 'running';
+  const entrants = shuffled(active.participants);
+  active.transitioning = false;
+  saveState();
+  await startTournamentRound(guild, entrants);
+}
+
+async function startTournamentRound(guild, entrants) {
+  const active = state.tournaments.active;
+  if (!active || active.status !== 'running') return;
+  active.round = Number(active.round || 0) + 1;
+  active.currentMatchIds = [];
+  active.roundByeUserId = entrants.length % 2 === 1 ? entrants[entrants.length - 1] : null;
+  const channel = guild.channels.cache.get(state.tournaments.channelId) || (await ensureTournamentInfrastructure(guild)).channel;
+  const roundPairs = [];
+  for (let i = 0; i + 1 < entrants.length; i += 2) roundPairs.push([entrants[i], entrants[i + 1]]);
+
+  await channel.send(v2Payload({
+    title: `🎮 Round ${active.round}`,
+    description: `${roundPairs.length} match${roundPairs.length === 1 ? '' : 'es'} this round.${active.roundByeUserId ? `\n\n🎟️ <@${active.roundByeUserId}> receives a bye into the next round.` : ''}\n\nWin your match to advance.`,
+  }));
+
+  for (let i = 0; i < roundPairs.length; i++) {
+    const [p1, p2] = roundPairs[i];
+    const id = makeId();
+    const match = {
+      id, round: active.round, number: i + 1, p1, p2, winner: null, messageId: null, rematches: 0,
+      board: Array(9).fill(null), turn: p1, choices: {}, lastResult: null,
+    };
+    active.matches[id] = match;
+    active.currentMatchIds.push(id);
+    saveState();
+    const msg = await channel.send(makeTournamentMatchPayload(active, match));
+    match.messageId = msg.id;
+    saveState();
+  }
+}
+
+function makeTournamentMatchPayload(active, match) {
+  return active.game === 'rps' ? makeRpsMatchPayload(active, match) : makeTicTacToeMatchPayload(active, match);
+}
+
+function makeTicTacToeMatchPayload(active, match) {
+  const symbol = id => id === match.p1 ? '❌' : '⭕';
+  const status = match.winner
+    ? `🏆 **Winner:** <@${match.winner}>`
+    : `${match.lastResult ? `${match.lastResult}\n` : ''}**Turn:** <@${match.turn}> ${symbol(match.turn)}`;
+  const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
+    `# ❌ ⭕ Match ${match.number}\n<@${match.p1}> **vs** <@${match.p2}>\n\n${status}\n-# Round ${match.round} • Best board wins and advances automatically.`
+  ));
+  const rows = [];
+  for (let r = 0; r < 3; r++) {
+    const row = new ActionRowBuilder();
+    for (let c = 0; c < 3; c++) {
+      const i = r * 3 + c;
+      const value = match.board?.[i];
+      row.addComponents(new ButtonBuilder()
+        .setCustomId(`tour:ttt:${active.id}:${match.id}:${i}`)
+        .setLabel(value === match.p1 ? 'X' : value === match.p2 ? 'O' : '·')
+        .setStyle(value === match.p1 ? ButtonStyle.Danger : value === match.p2 ? ButtonStyle.Primary : ButtonStyle.Secondary)
+        .setDisabled(Boolean(value || match.winner)));
+    }
+    rows.push(row);
+  }
+  return { components: [container, ...rows], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+}
+
+function makeRpsMatchPayload(active, match) {
+  const locked1 = Boolean(match.choices?.[match.p1]);
+  const locked2 = Boolean(match.choices?.[match.p2]);
+  let result = `**<@${match.p1}>:** ${locked1 ? 'Choice locked' : 'Waiting'}\n**<@${match.p2}>:** ${locked2 ? 'Choice locked' : 'Waiting'}`;
+  if (match.winner) {
+    result = `🪨📄✂️ <@${match.p1}> chose **${rpsChoiceName(match.choices[match.p1])}**\n<@${match.p2}> chose **${rpsChoiceName(match.choices[match.p2])}**\n\n🏆 **Winner:** <@${match.winner}>`;
+  } else if (match.lastResult) result = `${match.lastResult}\n\n${result}`;
+  const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
+    `# 🪨 📄 ✂️ Match ${match.number}\n<@${match.p1}> **vs** <@${match.p2}>\n\n${result}\n-# Round ${match.round} • Choices stay hidden until both players lock in.`
+  ));
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`tour:rps:${active.id}:${match.id}:rock`).setLabel('Rock').setEmoji('🪨').setStyle(ButtonStyle.Secondary).setDisabled(Boolean(match.winner)),
+    new ButtonBuilder().setCustomId(`tour:rps:${active.id}:${match.id}:paper`).setLabel('Paper').setEmoji('📄').setStyle(ButtonStyle.Secondary).setDisabled(Boolean(match.winner)),
+    new ButtonBuilder().setCustomId(`tour:rps:${active.id}:${match.id}:scissors`).setLabel('Scissors').setEmoji('✂️').setStyle(ButtonStyle.Secondary).setDisabled(Boolean(match.winner)),
+  );
+  return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+}
+
+function ticTacToeWinner(board) {
+  const combos = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+  for (const [a,b,c] of combos) if (board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
+  return null;
+}
+
+function rpsChoiceName(choice) {
+  return ({ rock: 'Rock', paper: 'Paper', scissors: 'Scissors' })[choice] || 'Unknown';
+}
+
+function rpsWinner(p1, c1, p2, c2) {
+  if (c1 === c2) return null;
+  const wins = { rock: 'scissors', paper: 'rock', scissors: 'paper' };
+  return wins[c1] === c2 ? p1 : p2;
+}
+
+async function handleTournamentButton(interaction) {
+  const parts = interaction.customId.split(':');
+  const action = parts[1];
+  const active = state.tournaments?.active;
+  if (!active || active.id !== parts[2]) return interaction.reply(v2Payload({ title: 'Tournament Ended', description: 'This tournament is no longer active.', ephemeral: true })).catch(() => {});
+
+  if (action === 'join' || action === 'leave') {
+    if (active.status !== 'registration') return interaction.reply(v2Payload({ title: 'Registration Closed', description: 'The bracket has already started.', ephemeral: true }));
+    const member = interaction.member;
+    if (!member?.roles?.cache?.has(CONFIG.customerRoleId)) return interaction.reply(v2Payload({ title: 'Customers Only', description: 'You need the Customer role to join this tournament.', ephemeral: true }));
+    active.participants ||= [];
+    const has = active.participants.includes(interaction.user.id);
+    if (action === 'join') {
+      if (has) return interaction.reply(v2Payload({ title: 'Already Joined', description: 'You are already registered.', ephemeral: true }));
+      if (active.participants.length >= MAX_TOURNAMENT_PLAYERS) return interaction.reply(v2Payload({ title: 'Tournament Full', description: `This tournament is capped at ${MAX_TOURNAMENT_PLAYERS} players.`, ephemeral: true }));
+      active.participants.push(interaction.user.id);
+    } else {
+      if (!has) return interaction.reply(v2Payload({ title: 'Not Registered', description: 'You are not currently in this tournament.', ephemeral: true }));
+      active.participants = active.participants.filter(id => id !== interaction.user.id);
+    }
+    saveState();
+    return interaction.update(makeTournamentRegistrationPayload(active));
+  }
+
+  const matchId = parts[3];
+  const match = active.matches?.[matchId];
+  if (!match || match.winner || active.status !== 'running' || match.round !== active.round) return interaction.reply(v2Payload({ title: 'Match Closed', description: 'This match is no longer accepting moves.', ephemeral: true }));
+  if (![match.p1, match.p2].includes(interaction.user.id)) return interaction.reply(v2Payload({ title: 'Not Your Match', description: 'Only the two players in this match can use these controls.', ephemeral: true }));
+
+  if (action === 'ttt') {
+    const cell = Number(parts[4]);
+    if (interaction.user.id !== match.turn) return interaction.reply(v2Payload({ title: 'Wait Your Turn', description: `It is currently <@${match.turn}>'s turn.`, ephemeral: true }));
+    if (!Number.isInteger(cell) || cell < 0 || cell > 8 || match.board[cell]) return interaction.reply(v2Payload({ title: 'Spot Taken', description: 'Choose an empty square.', ephemeral: true }));
+    match.board[cell] = interaction.user.id;
+    const winner = ticTacToeWinner(match.board);
+    if (winner) match.winner = winner;
+    else if (match.board.every(Boolean)) {
+      match.rematches = Number(match.rematches || 0) + 1;
+      match.board = Array(9).fill(null);
+      match.turn = match.rematches % 2 ? match.p2 : match.p1;
+      match.lastResult = '🤝 **Draw!** The board has reset for a rematch.';
+    } else {
+      match.turn = interaction.user.id === match.p1 ? match.p2 : match.p1;
+      match.lastResult = null;
+    }
+    saveState();
+    await interaction.update(makeTicTacToeMatchPayload(active, match));
+    if (match.winner) await maybeFinishTournamentRound(interaction.guild);
+    return;
+  }
+
+  if (action === 'rps') {
+    const choice = parts[4];
+    if (!['rock','paper','scissors'].includes(choice)) return;
+    match.choices ||= {};
+    if (match.choices[interaction.user.id]) return interaction.reply(v2Payload({ title: 'Choice Already Locked', description: 'Your choice is already locked for this attempt.', ephemeral: true }));
+    match.choices[interaction.user.id] = choice;
+    const c1 = match.choices[match.p1], c2 = match.choices[match.p2];
+    if (!c1 || !c2) {
+      saveState();
+      await interaction.reply(v2Payload({ title: 'Choice Locked', description: 'Your choice is hidden. Waiting for your opponent.', ephemeral: true }));
+      const msg = interaction.message;
+      await msg.edit(makeRpsMatchPayload(active, match)).catch(() => {});
+      return;
+    }
+    const winner = rpsWinner(match.p1, c1, match.p2, c2);
+    if (!winner) {
+      match.rematches = Number(match.rematches || 0) + 1;
+      match.lastResult = `🤝 **Tie!** Both players chose **${rpsChoiceName(c1)}**. Choose again.`;
+      match.choices = {};
+    } else match.winner = winner;
+    saveState();
+    await interaction.update(makeRpsMatchPayload(active, match));
+    if (match.winner) await maybeFinishTournamentRound(interaction.guild);
+  }
+}
+
+async function maybeFinishTournamentRound(guild) {
+  const active = state.tournaments?.active;
+  if (!active || active.status !== 'running' || active.transitioning) return;
+  const matches = (active.currentMatchIds || []).map(id => active.matches?.[id]).filter(Boolean);
+  if (matches.some(m => !m.winner)) return;
+  active.transitioning = true;
+  saveState();
+  const winners = matches.map(m => m.winner);
+  if (active.roundByeUserId) winners.push(active.roundByeUserId);
+  if (winners.length === 1) {
+    await finishTournament(guild, winners[0]);
+    return;
+  }
+  active.transitioning = false;
+  saveState();
+  await startTournamentRound(guild, winners);
+}
+
+async function finishTournament(guild, winnerId) {
+  const active = state.tournaments?.active;
+  if (!active) return;
+  const { channel, role } = await ensureTournamentInfrastructure(guild);
+  active.status = 'finished';
+  active.winnerId = winnerId;
+  active.finishedAt = Date.now();
+  active.transitioning = false;
+  saveState();
+  const member = await guild.members.fetch(winnerId).catch(() => null);
+  if (member && role) await member.roles.add(role, 'Won a PvP tournament').catch(() => {});
+  await setTournamentChatEnabled(channel, false);
+  const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
+    `# 🏆 Tournament Champion\n🎉 <@${winnerId}> won the **${tournamentGameName(active.game)}** tournament!\n\n` +
+    `**Prize**\n${escapeMassMentions(active.prize)}\n\n` +
+    `👑 The **Champion** role has been awarded as a cosmetic winner role.\n` +
+    `🎫 Open a support ticket below to claim the prize.\n\n-# Tournament chat is now closed until the next event.`
+  ));
+  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Claim Prize').setEmoji('🎫').setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL));
+  await channel.send({ components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
+}
+
+async function handleTournamentSetup(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const channelName = interaction.options.getString('channel_name')?.trim();
+  if (channelName) state.tournaments.channelName = channelName;
+  saveState();
+  const { channel, role } = await ensureTournamentInfrastructure(interaction.guild);
+  await setTournamentChatEnabled(channel, Boolean(state.tournaments.active && ['registration','running'].includes(state.tournaments.active.status)));
+  return interaction.reply(v2Payload({ title: '🏆 Tournament System Ready', description: `**Channel:** ${channel}\n**Customer access:** View only until a tournament starts\n**Champion role:** ${role}\n**Daily schedule:** ${state.tournaments.daily.enabled ? `Enabled at ${state.tournaments.daily.time} (${CONFIG.timeZone})` : 'Disabled'}`, ephemeral: true }));
+}
+
+async function handleTournamentPrize(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const game = interaction.options.getString('game', true);
+  const prize = interaction.options.getString('prize', true).trim();
+  state.tournaments.prizes[game] = prize;
+  saveState();
+  return interaction.reply(v2Payload({ title: '💰 Tournament Prize Updated', description: `**${tournamentGameName(game)}**\n${escapeMassMentions(prize)}`, ephemeral: true }));
+}
+
+async function handleTournamentDaily(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const enabled = interaction.options.getBoolean('enabled', true);
+  const time = interaction.options.getString('time');
+  const game = interaction.options.getString('game');
+  if (time && !parseClockTime(time)) return fail(interaction, 'Invalid Time', 'Use a 24-hour time like `19:00`.');
+  state.tournaments.daily.enabled = enabled;
+  if (time) state.tournaments.daily.time = time;
+  if (game) state.tournaments.daily.game = game;
+  state.tournaments.daily.nextAt = enabled ? nextDailyTimeTimestamp(state.tournaments.daily.time) : null;
+  saveState();
+  return interaction.reply(v2Payload({ title: '📅 Daily Tournament Updated', description: enabled ? `Daily tournaments are **ON**.\n\n**Time:** ${state.tournaments.daily.time} (${CONFIG.timeZone})\n**Game:** ${state.tournaments.daily.game === 'rotate' ? 'Rotating Tic-Tac-Toe / Rock Paper Scissors' : tournamentGameName(state.tournaments.daily.game)}\n**Next:** <t:${Math.floor(state.tournaments.daily.nextAt / 1000)}:F>` : 'Daily tournaments are now **OFF**.', ephemeral: true }));
+}
+
+async function handleTournamentStart(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const game = interaction.options.getString('game', true);
+  const prize = interaction.options.getString('prize')?.trim() || state.tournaments.prizes[game] || 'To be announced';
+  const minutes = interaction.options.getInteger('registration_minutes') || TOURNAMENT_REGISTRATION_MINUTES;
+  if (state.tournaments.active && ['registration','running'].includes(state.tournaments.active.status)) return fail(interaction, 'Tournament Already Active', 'Finish or cancel the current tournament first.');
+  const active = await startTournamentRegistration(interaction.guild, game, prize, minutes, 'Manual tournament');
+  const channel = interaction.guild.channels.cache.get(state.tournaments.channelId);
+  return interaction.reply(v2Payload({ title: '⚔️ Tournament Opened', description: `Registration is live in ${channel}.\n\n**Game:** ${tournamentGameName(game)}\n**Prize:** ${escapeMassMentions(prize)}\n**Closes:** <t:${Math.floor(active.registrationClosesAt / 1000)}:R>`, ephemeral: true }));
+}
+
+async function handleTournamentBegin(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  if (state.tournaments?.active?.status !== 'registration') return fail(interaction, 'No Registration Open', 'There is no tournament registration to begin.');
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  await beginTournamentBracket(interaction.guild);
+  return interaction.editReply(v2Edit({ title: '🎮 Tournament Started', description: 'Registration is closed and the first round has been posted.' }));
+}
+
+async function handleTournamentStatus(interaction) {
+  const t = state.tournaments;
+  const active = t?.active;
+  const channel = t?.channelId ? `<#${t.channelId}>` : 'Not created yet';
+  let activeText = 'No active tournament.';
+  if (active && ['registration','running'].includes(active.status)) activeText = `**${tournamentGameName(active.game)}** • ${active.status}\nPlayers: **${active.participants?.length || 0}**\nRound: **${active.round || 0}**\nPrize: **${escapeMassMentions(active.prize)}**`;
+  return interaction.reply(v2Payload({ title: '🏆 Tournament Status', description: `**Channel:** ${channel}\n**Daily:** ${t.daily.enabled ? `On at ${t.daily.time} (${CONFIG.timeZone})` : 'Off'}\n**Daily Game:** ${t.daily.game === 'rotate' ? 'Rotating' : tournamentGameName(t.daily.game)}\n\n${activeText}`, ephemeral: true }));
+}
+
+async function handleTournamentCancel(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const active = state.tournaments?.active;
+  if (!active || !['registration','running'].includes(active.status)) return fail(interaction, 'No Active Tournament', 'There is no active tournament to cancel.');
+  active.status = 'cancelled';
+  active.cancelledAt = Date.now();
+  saveState();
+  const { channel } = await ensureTournamentInfrastructure(interaction.guild);
+  await setTournamentChatEnabled(channel, false);
+  await channel.send(v2Payload({ title: 'Tournament Cancelled', description: 'Staff cancelled the current tournament. Tournament chat is now closed.' }));
+  return interaction.reply(v2Payload({ title: 'Tournament Cancelled', description: `The tournament in ${channel} has been stopped.`, ephemeral: true }));
+}
+
+// ---------- CHAT DROPS ----------
+
+function normalizeChatDropState(value, defaults) {
+  const source = value && typeof value === 'object' ? value : {};
+  return { ...defaults, ...source, activeDrop: source.activeDrop && typeof source.activeDrop === 'object' ? source.activeDrop : null };
+}
+
+function localDateKey(timestamp = Date.now()) {
+  const p = zonedParts(timestamp, CONFIG.timeZone);
+  return `${p.year}-${String(p.month).padStart(2,'0')}-${String(p.day).padStart(2,'0')}`;
+}
+
+function scheduleNextChatDrop(afterTodayDrop = false) {
+  const cfg = state.chatDrops;
+  if (!cfg?.enabled) return null;
+  const now = Date.now();
+  const parts = zonedParts(now, CONFIG.timeZone);
+  let targetDate = { year: parts.year, month: parts.month, day: parts.day };
+  let minMinute = 8 * 60;
+  const maxMinute = 23 * 60 + 45;
+  const todayAlreadyUsed = afterTodayDrop || cfg.lastDropLocalDate === localDateKey(now);
+  if (!todayAlreadyUsed) minMinute = Math.max(minMinute, parts.hour * 60 + parts.minute + 10);
+  if (todayAlreadyUsed || minMinute > maxMinute) targetDate = addLocalDays(parts, 1), minMinute = 8 * 60;
+  const minuteOfDay = Math.floor(Math.random() * (maxMinute - minMinute + 1)) + minMinute;
+  cfg.nextDropAt = zonedDateTimeToUtcMs(targetDate.year, targetDate.month, targetDate.day, Math.floor(minuteOfDay / 60), minuteOfDay % 60, CONFIG.timeZone);
+  saveState();
+  return cfg.nextDropAt;
+}
+
+function randomDropAmount() {
+  const min = clampNumber(Number(state.chatDrops.minimum || 1), 1, CHAT_DROP_MAX, 100000);
+  const max = clampNumber(Number(state.chatDrops.maximum || CHAT_DROP_MAX), min, CHAT_DROP_MAX, 900000);
+  if (max - min >= 10000) {
+    const low = Math.ceil(min / 10000), high = Math.floor(max / 10000);
+    if (high >= low) return (Math.floor(Math.random() * (high - low + 1)) + low) * 10000;
+  }
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function makeChatDropPayload(drop) {
+  const claimed = Boolean(drop.claimedBy);
+  const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
+    claimed
+      ? `# 💰 Cash Drop Claimed\n🏆 <@${drop.claimedBy}> was the first person to claim **$${Number(drop.amount).toLocaleString()} Bloxburg Cash**!\n\n🎫 Use the support button below to claim the prize.`
+      : `# 💸 CHAT DROP\n**$${Number(drop.amount).toLocaleString()} Bloxburg Cash** is up for grabs!\n\n⚡ **First person to click wins.**\n-# One claim only. Be quick.`
+  ));
+  const row = new ActionRowBuilder();
+  if (!claimed) row.addComponents(new ButtonBuilder().setCustomId(`chatdrop:claim:${drop.id}`).setLabel('Claim Drop').setEmoji('💰').setStyle(ButtonStyle.Success));
+  else row.addComponents(new ButtonBuilder().setLabel('Claim Prize').setEmoji('🎫').setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL));
+  return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+}
+
+async function sendChatDrop(guild, channel, amount = null, scheduled = false) {
+  if (state.chatDrops.activeDrop && !state.chatDrops.activeDrop.claimedBy) throw new Error('There is already an unclaimed chat drop.');
+  const drop = { id: makeId(), amount: amount || randomDropAmount(), channelId: channel.id, messageId: null, claimedBy: null, createdAt: Date.now(), scheduled };
+  state.chatDrops.activeDrop = drop;
+  state.chatDrops.lastDropLocalDate = localDateKey();
+  saveState();
+  const msg = await channel.send(makeChatDropPayload(drop));
+  drop.messageId = msg.id;
+  if (state.chatDrops.enabled) scheduleNextChatDrop(true); else saveState();
+  return drop;
+}
+
+async function checkChatDrops() {
+  const cfg = state.chatDrops;
+  if (!cfg?.enabled) return;
+  if (!cfg.nextDropAt) scheduleNextChatDrop(false);
+  if (!cfg.nextDropAt || Date.now() < cfg.nextDropAt) return;
+  const guild = client.guilds.cache.get(CONFIG.guildId);
+  if (!guild) return;
+  const channel = guild.channels.cache.get(cfg.channelId);
+  if (!channel?.isTextBased()) {
+    cfg.enabled = false;
+    cfg.nextDropAt = null;
+    saveState();
+    return;
+  }
+  if (cfg.activeDrop && !cfg.activeDrop.claimedBy) {
+    scheduleNextChatDrop(true);
+    return;
+  }
+  try { await sendChatDrop(guild, channel, null, true); }
+  catch (error) { console.error('[CHAT DROP] Scheduled send failed:', error); scheduleNextChatDrop(true); }
+}
+
+async function handleChatDropButton(interaction) {
+  const [, action, id] = interaction.customId.split(':');
+  if (action !== 'claim') return;
+  const drop = state.chatDrops?.activeDrop;
+  if (!drop || drop.id !== id) return interaction.reply(v2Payload({ title: 'Drop Expired', description: 'This cash drop is no longer active.', ephemeral: true }));
+  if (drop.claimedBy) return interaction.reply(v2Payload({ title: 'Too Slow', description: `<@${drop.claimedBy}> already claimed this drop.`, ephemeral: true }));
+  drop.claimedBy = interaction.user.id;
+  drop.claimedAt = Date.now();
+  saveState();
+  await interaction.update(makeChatDropPayload(drop));
+  await logAction({ title: 'Chat Drop Claimed', description: `${interaction.user} claimed a Bloxburg cash drop.`, moderator: client.user, target: interaction.user, reason: `$${Number(drop.amount).toLocaleString()} Bloxburg Cash`, extra: `Channel: <#${drop.channelId}>` }).catch(() => {});
+}
+
+async function handleChatDrops(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const sub = interaction.options.getSubcommand();
+  const cfg = state.chatDrops;
+  if (sub === 'start') {
+    const channel = interaction.options.getChannel('channel') || interaction.channel;
+    if (!channel?.isTextBased()) return fail(interaction, 'Invalid Channel', 'Choose a normal text channel for chat drops.');
+    const minimum = interaction.options.getInteger('minimum') ?? cfg.minimum ?? 100000;
+    const maximum = interaction.options.getInteger('maximum') ?? cfg.maximum ?? 900000;
+    if (minimum > maximum) return fail(interaction, 'Invalid Range', 'The minimum cannot be higher than the maximum.');
+    cfg.enabled = true; cfg.channelId = channel.id; cfg.minimum = minimum; cfg.maximum = Math.min(maximum, CHAT_DROP_MAX); cfg.nextDropAt = null;
+    scheduleNextChatDrop(false);
+    return interaction.reply(v2Payload({ title: '💸 Daily Chat Drops Enabled', description: `**Channel:** ${channel}\n**Range:** $${minimum.toLocaleString()} - $${cfg.maximum.toLocaleString()}\n**Next random drop:** <t:${Math.floor(cfg.nextDropAt / 1000)}:R>\n\n-# The bot will not run this system unless /chatdrops start has been used.`, ephemeral: true }));
+  }
+  if (sub === 'stop') {
+    cfg.enabled = false; cfg.nextDropAt = null; saveState();
+    return interaction.reply(v2Payload({ title: 'Chat Drops Disabled', description: 'Automatic daily cash drops are now OFF. Any already-posted drop stays claimable.', ephemeral: true }));
+  }
+  if (sub === 'status') {
+    return interaction.reply(v2Payload({ title: '💰 Chat Drop Status', description: `**Automatic drops:** ${cfg.enabled ? 'ON' : 'OFF'}\n**Channel:** ${cfg.channelId ? `<#${cfg.channelId}>` : 'Not set'}\n**Range:** $${Number(cfg.minimum).toLocaleString()} - $${Number(cfg.maximum).toLocaleString()}\n**Next:** ${cfg.enabled && cfg.nextDropAt ? `<t:${Math.floor(cfg.nextDropAt / 1000)}:F> (<t:${Math.floor(cfg.nextDropAt / 1000)}:R>)` : 'Not scheduled'}\n**Active unclaimed drop:** ${cfg.activeDrop && !cfg.activeDrop.claimedBy ? `$${Number(cfg.activeDrop.amount).toLocaleString()}` : 'None'}`, ephemeral: true }));
+  }
+  if (sub === 'now') {
+    const channel = interaction.options.getChannel('channel') || (cfg.channelId ? interaction.guild.channels.cache.get(cfg.channelId) : null) || interaction.channel;
+    if (!channel?.isTextBased()) return fail(interaction, 'Invalid Channel', 'Choose a normal text channel.');
+    const amount = interaction.options.getInteger('amount') || randomDropAmount();
+    if (cfg.activeDrop && !cfg.activeDrop.claimedBy) return fail(interaction, 'Drop Already Active', 'The previous chat drop still has not been claimed.');
+    await sendChatDrop(interaction.guild, channel, amount, false);
+    return interaction.reply(v2Payload({ title: '💸 Chat Drop Sent', description: `A **$${Number(amount).toLocaleString()}** cash drop was posted in ${channel}.`, ephemeral: true }));
+  }
+}
+
+// ---------- FAQ ----------
+
+function normalizeFaqState(value, defaults) {
+  const source = value && typeof value === 'object' ? value : {};
+  return { ...defaults, ...source, items: Array.isArray(source.items) ? source.items : [] };
+}
+
+async function ensureFaqChannel(guild) {
+  state.faq ||= { channelId: null, messageId: null, items: [] };
+  let channel = state.faq.channelId ? guild.channels.cache.get(state.faq.channelId) : null;
+  channel ||= guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === FAQ_CHANNEL_NAME) || null;
+  if (!channel) {
+    channel = await guild.channels.create({
+      name: FAQ_CHANNEL_NAME,
+      type: ChannelType.GuildText,
+      topic: 'Frequently asked questions and a direct link to Bloxburg Store support tickets.',
+      permissionOverwrites: [
+        { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages] },
+        { id: guild.members.me.id, type: OverwriteType.Member, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages] },
+      ],
+      reason: 'Auto-created FAQ channel',
+    });
+  } else {
+    await channel.permissionOverwrites.edit(guild.roles.everyone.id, { ViewChannel: true, ReadMessageHistory: true, SendMessages: false }, { reason: 'FAQ is read-only' }).catch(() => {});
+  }
+  state.faq.channelId = channel.id;
+  saveState();
+  return channel;
+}
+
+function makeFaqPayload() {
+  const items = state.faq?.items || [];
+  const container = new ContainerBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`# ❓ Bloxburg Store FAQ\nFind quick answers below. If you still need help, use the **Make a Support Ticket** button at the bottom.`)
+  );
+  if (!items.length) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent('*No FAQ entries have been added yet.*'));
+  } else {
+    for (const [i, item] of items.entries()) {
+      container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${i + 1}. ${escapeMassMentions(item.question)}\n${escapeMassMentions(item.answer)}`));
+    }
+  }
+  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Make a Support Ticket').setEmoji('🎫').setStyle(ButtonStyle.Link).setURL(SUPPORT_TICKETS_URL));
+  return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+}
+
+async function refreshFaqMessage(guild) {
+  const channel = await ensureFaqChannel(guild);
+  let msg = state.faq.messageId ? await channel.messages.fetch(state.faq.messageId).catch(() => null) : null;
+  if (!msg) {
+    msg = await channel.send(makeFaqPayload());
+    state.faq.messageId = msg.id;
+    saveState();
+  } else await msg.edit(makeFaqPayload());
+  return { channel, msg };
+}
+
+async function handleFaqAdd(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  if ((state.faq.items || []).length >= 9) return fail(interaction, 'FAQ Full', 'The live V2 FAQ panel supports up to 9 entries. Remove or combine an older entry before adding another.');
+  const question = interaction.options.getString('question', true).trim();
+  const answer = interaction.options.getString('answer', true).trim();
+  state.faq.items.push({ id: makeId(), question, answer, createdAt: Date.now() });
+  saveState();
+  const { channel } = await refreshFaqMessage(interaction.guild);
+  return interaction.reply(v2Payload({ title: 'FAQ Added', description: `Added **#${state.faq.items.length}** and refreshed ${channel}.`, ephemeral: true }));
+}
+
+async function handleFaqEdit(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const number = interaction.options.getInteger('number', true);
+  const item = state.faq.items?.[number - 1];
+  if (!item) return fail(interaction, 'FAQ Not Found', `There is no FAQ entry #${number}.`);
+  const question = interaction.options.getString('question');
+  const answer = interaction.options.getString('answer');
+  if (!question && !answer) return fail(interaction, 'Nothing To Change', 'Provide a new question, answer, or both.');
+  if (question) item.question = question.trim();
+  if (answer) item.answer = answer.trim();
+  item.updatedAt = Date.now();
+  saveState();
+  const { channel } = await refreshFaqMessage(interaction.guild);
+  return interaction.reply(v2Payload({ title: 'FAQ Updated', description: `Updated **FAQ #${number}** and refreshed ${channel}.`, ephemeral: true }));
+}
+
+async function handleFaqRemove(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const number = interaction.options.getInteger('number', true);
+  const item = state.faq.items?.[number - 1];
+  if (!item) return fail(interaction, 'FAQ Not Found', `There is no FAQ entry #${number}.`);
+  state.faq.items.splice(number - 1, 1);
+  saveState();
+  const { channel } = await refreshFaqMessage(interaction.guild);
+  return interaction.reply(v2Payload({ title: 'FAQ Removed', description: `Removed **${escapeMassMentions(item.question)}** and refreshed ${channel}.`, ephemeral: true }));
+}
+
+async function handleFaqList(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const items = state.faq.items || [];
+  const text = items.length ? items.map((x, i) => `**${i + 1}.** ${escapeMassMentions(x.question)}`).join('\n') : 'No FAQ entries have been added yet.';
+  return interaction.reply(v2Payload({ title: 'Saved FAQ Entries', description: truncate(text, 3500), ephemeral: true }));
+}
+
+async function handleFaqRefresh(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const { channel } = await refreshFaqMessage(interaction.guild);
+  return interaction.reply(v2Payload({ title: 'FAQ Refreshed', description: `The live FAQ message in ${channel} has been rebuilt.`, ephemeral: true }));
+}
+
 async function sendModerationDM(user, { guildName, action, reason, duration, details }) {
   const durationText = duration ? `\n**Duration**\n${escapeMassMentions(duration)}` : '';
   const detailsText = details ? `\n\n${details}` : '';
@@ -3250,7 +4180,7 @@ function stripEphemeralFlag(payload) {
 
 function loadState() {
   const defaults = {
-    version: 5,
+    version: 6,
     nextBaptismAt: null,
     lockdown: { active: false, channels: {} },
     warnings: {},
@@ -3263,6 +4193,24 @@ function loadState() {
     censorWarnCooldowns: {},
     dmPolls: {},
     pollResultsChannelId: null,
+    tournaments: {
+      channelId: null,
+      championRoleId: null,
+      channelName: TOURNAMENT_CHANNEL_NAME,
+      prizes: { tictactoe: 'To be announced', rps: 'To be announced' },
+      daily: { enabled: true, time: '19:00', game: 'rotate', nextAt: null, rotationIndex: 0 },
+      active: null,
+    },
+    chatDrops: {
+      enabled: false,
+      channelId: null,
+      minimum: 100000,
+      maximum: 900000,
+      nextDropAt: null,
+      activeDrop: null,
+      lastDropLocalDate: null,
+    },
+    faq: { channelId: null, messageId: null, items: [] },
   };
 
   if (!fs.existsSync(STATE_FILE)) return defaults;
@@ -3287,6 +4235,9 @@ function loadState() {
       censorWarnCooldowns: parsed.censorWarnCooldowns && typeof parsed.censorWarnCooldowns === 'object' ? parsed.censorWarnCooldowns : {},
       dmPolls: parsed.dmPolls && typeof parsed.dmPolls === 'object' ? parsed.dmPolls : {},
       pollResultsChannelId: parsed.pollResultsChannelId || null,
+      tournaments: normalizeTournamentState(parsed.tournaments, defaults.tournaments),
+      chatDrops: normalizeChatDropState(parsed.chatDrops, defaults.chatDrops),
+      faq: normalizeFaqState(parsed.faq, defaults.faq),
       lockdown: parsed.lockdown || defaults.lockdown,
     };
   } catch (error) {
