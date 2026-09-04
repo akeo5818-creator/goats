@@ -84,7 +84,7 @@ Members with closed DMs are counted as failed deliveries rather than stopping th
 
 The bot automatically creates a customer-only `#pvp-tournaments` channel and a cosmetic `Champion` role with no permissions. `@everyone` cannot see the tournament channel; the configured Customer role can view it. Customer chat is locked while no tournament is running, opens when registration begins, and locks again when the tournament finishes or is cancelled.
 
-Games included in v2.2:
+Games included in v2.3:
 - **Tic-Tac-Toe** - real 3x3 Discord button board, turn enforcement, automatic draw rematches and round advancement.
 - **Rock Paper Scissors** - private hidden choices until both players lock in, tie rematches and automatic round advancement.
 
@@ -97,7 +97,7 @@ Tournament commands:
 - `/tournamentstatus` - show configuration/current round.
 - `/tournamentcancel` - stop the active tournament and lock chat.
 
-Daily/manual tournaments use a registration stage, then automatically generate round matchups until one player remains. The winner receives the cosmetic **Champion** role and a V2 winner panel with a **Claim Prize** button linking to the support-ticket channel.
+Daily/manual tournaments use a timed registration stage with **no fixed player cap**. However many eligible customers join before registration closes become the bracket; odd-sized rounds automatically receive byes until one player remains. The winner receives the cosmetic **Champion** role and a V2 winner panel with a **Claim Prize** button linking to the support-ticket channel.
 
 ## Random chat drops
 
@@ -242,10 +242,9 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 
 `/censoradd` accepts multiple words at once. Each space/comma-separated censor entry becomes its own trigger word. If any trigger appears in a non-bot message anywhere in the server, the whole message is deleted. Existing older multi-word censor entries are automatically split into individual trigger words when state is loaded.
 
-## v2.2 changes
+## v2.3 changes
 
-- Keeps the v2.1 auto-created poll-results channel and richer numbered `/servergraph`.
-- Adds auto-created customer-only PvP tournaments with real Tic-Tac-Toe and Rock Paper Scissors brackets.
-- Adds configurable daily/manual tournament prizes and the cosmetic Champion role.
-- Adds opt-in random daily cash drops under 1,000,000 with first-click claiming.
-- Adds an auto-created read-only FAQ channel with live command-managed Q&A and a support-ticket link button.
+- Keeps every v2.2 tournament, chat-drop, FAQ, moderation, analytics and poll feature.
+- Tournament panels and winners now use `<a:Trophy_fixed:1545550040628461588>` as the trophy emoji.
+- Removes the old 32-player tournament cap completely. Every eligible customer who joins during the registration window is entered into the bracket.
+- Odd player counts continue to use automatic byes so brackets work with any signup count of 2 or more.

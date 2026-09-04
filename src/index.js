@@ -60,7 +60,7 @@ const TOURNAMENT_CHANNEL_NAME = 'pvp-tournaments';
 const FAQ_CHANNEL_NAME = 'faq';
 const CHAMPION_ROLE_NAME = 'Champion';
 const TOURNAMENT_REGISTRATION_MINUTES = 10;
-const MAX_TOURNAMENT_PLAYERS = 32;
+const TOURNAMENT_TROPHY = '<a:Trophy_fixed:1545550040628461588>';
 const CHAT_DROP_MAX = 999_999;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
@@ -3490,11 +3490,12 @@ function makeTournamentRegistrationPayload(active) {
   const more = participants.length > 20 ? `\n...and ${participants.length - 20} more` : '';
   const container = new ContainerBuilder().addTextDisplayComponents(
     new TextDisplayBuilder().setContent(
-      `# 🏆 ${tournamentGameName(active.game)} Tournament\n` +
+      `# ${TOURNAMENT_TROPHY} ${tournamentGameName(active.game)} Tournament\n` +
       `${tournamentGameEmoji(active.game)} **Registration is OPEN**\n\n` +
       `**Prize**\n${escapeMassMentions(active.prize)}\n\n` +
-      `**Players** ${participants.length}/${MAX_TOURNAMENT_PLAYERS}\n${names}${more}\n\n` +
+      `**Players Joined** ${participants.length}\n${names}${more}\n\n` +
       `Registration closes <t:${Math.floor(active.registrationClosesAt / 1000)}:R>.\n` +
+      `**Everyone who joins before registration closes is entered. There is no fixed player cap.**\n` +
       `-# Customer chat is open while the tournament is active. Winners receive the cosmetic Champion role and claim prizes through Support.`
     )
   );
@@ -3603,7 +3604,7 @@ function makeTournamentMatchPayload(active, match) {
 function makeTicTacToeMatchPayload(active, match) {
   const symbol = id => id === match.p1 ? '❌' : '⭕';
   const status = match.winner
-    ? `🏆 **Winner:** <@${match.winner}>`
+    ? `${TOURNAMENT_TROPHY} **Winner:** <@${match.winner}>`
     : `${match.lastResult ? `${match.lastResult}\n` : ''}**Turn:** <@${match.turn}> ${symbol(match.turn)}`;
   const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
     `# ❌ ⭕ Match ${match.number}\n<@${match.p1}> **vs** <@${match.p2}>\n\n${status}\n-# Round ${match.round} • Best board wins and advances automatically.`
@@ -3630,7 +3631,7 @@ function makeRpsMatchPayload(active, match) {
   const locked2 = Boolean(match.choices?.[match.p2]);
   let result = `**<@${match.p1}>:** ${locked1 ? 'Choice locked' : 'Waiting'}\n**<@${match.p2}>:** ${locked2 ? 'Choice locked' : 'Waiting'}`;
   if (match.winner) {
-    result = `🪨📄✂️ <@${match.p1}> chose **${rpsChoiceName(match.choices[match.p1])}**\n<@${match.p2}> chose **${rpsChoiceName(match.choices[match.p2])}**\n\n🏆 **Winner:** <@${match.winner}>`;
+    result = `🪨📄✂️ <@${match.p1}> chose **${rpsChoiceName(match.choices[match.p1])}**\n<@${match.p2}> chose **${rpsChoiceName(match.choices[match.p2])}**\n\n${TOURNAMENT_TROPHY} **Winner:** <@${match.winner}>`;
   } else if (match.lastResult) result = `${match.lastResult}\n\n${result}`;
   const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
     `# 🪨 📄 ✂️ Match ${match.number}\n<@${match.p1}> **vs** <@${match.p2}>\n\n${result}\n-# Round ${match.round} • Choices stay hidden until both players lock in.`
@@ -3673,7 +3674,6 @@ async function handleTournamentButton(interaction) {
     const has = active.participants.includes(interaction.user.id);
     if (action === 'join') {
       if (has) return interaction.reply(v2Payload({ title: 'Already Joined', description: 'You are already registered.', ephemeral: true }));
-      if (active.participants.length >= MAX_TOURNAMENT_PLAYERS) return interaction.reply(v2Payload({ title: 'Tournament Full', description: `This tournament is capped at ${MAX_TOURNAMENT_PLAYERS} players.`, ephemeral: true }));
       active.participants.push(interaction.user.id);
     } else {
       if (!has) return interaction.reply(v2Payload({ title: 'Not Registered', description: 'You are not currently in this tournament.', ephemeral: true }));
@@ -3767,7 +3767,7 @@ async function finishTournament(guild, winnerId) {
   if (member && role) await member.roles.add(role, 'Won a PvP tournament').catch(() => {});
   await setTournamentChatEnabled(channel, false);
   const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
-    `# 🏆 Tournament Champion\n🎉 <@${winnerId}> won the **${tournamentGameName(active.game)}** tournament!\n\n` +
+    `# ${TOURNAMENT_TROPHY} Tournament Champion\n🎉 <@${winnerId}> won the **${tournamentGameName(active.game)}** tournament!\n\n` +
     `**Prize**\n${escapeMassMentions(active.prize)}\n\n` +
     `👑 The **Champion** role has been awarded as a cosmetic winner role.\n` +
     `🎫 Open a support ticket below to claim the prize.\n\n-# Tournament chat is now closed until the next event.`
@@ -3783,7 +3783,7 @@ async function handleTournamentSetup(interaction) {
   saveState();
   const { channel, role } = await ensureTournamentInfrastructure(interaction.guild);
   await setTournamentChatEnabled(channel, Boolean(state.tournaments.active && ['registration','running'].includes(state.tournaments.active.status)));
-  return interaction.reply(v2Payload({ title: '🏆 Tournament System Ready', description: `**Channel:** ${channel}\n**Customer access:** View only until a tournament starts\n**Champion role:** ${role}\n**Daily schedule:** ${state.tournaments.daily.enabled ? `Enabled at ${state.tournaments.daily.time} (${CONFIG.timeZone})` : 'Disabled'}`, ephemeral: true }));
+  return interaction.reply(v2Payload({ title: `${TOURNAMENT_TROPHY} Tournament System Ready`, description: `**Channel:** ${channel}\n**Customer access:** View only until a tournament starts\n**Champion role:** ${role}\n**Daily schedule:** ${state.tournaments.daily.enabled ? `Enabled at ${state.tournaments.daily.time} (${CONFIG.timeZone})` : 'Disabled'}`, ephemeral: true }));
 }
 
 async function handleTournamentPrize(interaction) {
@@ -3834,7 +3834,7 @@ async function handleTournamentStatus(interaction) {
   const channel = t?.channelId ? `<#${t.channelId}>` : 'Not created yet';
   let activeText = 'No active tournament.';
   if (active && ['registration','running'].includes(active.status)) activeText = `**${tournamentGameName(active.game)}** • ${active.status}\nPlayers: **${active.participants?.length || 0}**\nRound: **${active.round || 0}**\nPrize: **${escapeMassMentions(active.prize)}**`;
-  return interaction.reply(v2Payload({ title: '🏆 Tournament Status', description: `**Channel:** ${channel}\n**Daily:** ${t.daily.enabled ? `On at ${t.daily.time} (${CONFIG.timeZone})` : 'Off'}\n**Daily Game:** ${t.daily.game === 'rotate' ? 'Rotating' : tournamentGameName(t.daily.game)}\n\n${activeText}`, ephemeral: true }));
+  return interaction.reply(v2Payload({ title: `${TOURNAMENT_TROPHY} Tournament Status`, description: `**Channel:** ${channel}\n**Daily:** ${t.daily.enabled ? `On at ${t.daily.time} (${CONFIG.timeZone})` : 'Off'}\n**Daily Game:** ${t.daily.game === 'rotate' ? 'Rotating' : tournamentGameName(t.daily.game)}\n\n${activeText}`, ephemeral: true }));
 }
 
 async function handleTournamentCancel(interaction) {
@@ -3893,7 +3893,7 @@ function makeChatDropPayload(drop) {
   const claimed = Boolean(drop.claimedBy);
   const container = new ContainerBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(
     claimed
-      ? `# 💰 Cash Drop Claimed\n🏆 <@${drop.claimedBy}> was the first person to claim **$${Number(drop.amount).toLocaleString()} Bloxburg Cash**!\n\n🎫 Use the support button below to claim the prize.`
+      ? `# 💰 Cash Drop Claimed\n${TOURNAMENT_TROPHY} <@${drop.claimedBy}> was the first person to claim **$${Number(drop.amount).toLocaleString()} Bloxburg Cash**!\n\n🎫 Use the support button below to claim the prize.`
       : `# 💸 CHAT DROP\n**$${Number(drop.amount).toLocaleString()} Bloxburg Cash** is up for grabs!\n\n⚡ **First person to click wins.**\n-# One claim only. Be quick.`
   ));
   const row = new ActionRowBuilder();

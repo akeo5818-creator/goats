@@ -1,6 +1,6 @@
 {
   "name": "bloxy-moderation-bot",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "private": true,
   "type": "module",
   "description": "Standalone Discord moderation, security, server-info and analytics bot with rotating presence statuses, joins/leaves graphs, censor warnings, lockdowns, DM logs, interactive DM polls, auto-created private poll analytics, richer numbered joins/leaves graphs, daily PvP tournaments, random cash drops, an auto-created FAQ system, V2 components, and moderation tools.",
