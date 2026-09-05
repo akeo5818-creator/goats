@@ -69,6 +69,7 @@ const SUPPORT_TICKETS_URL = 'https://discord.com/channels/1537689864827445278/15
 const TOURNAMENT_CHANNEL_NAME = 'pvp-tournaments';
 const FAQ_CHANNEL_NAME = 'faq';
 const CHAMPION_ROLE_NAME = 'Champion';
+const LINK_BYPASS_ROLE_NAME = 'Link Bypass';
 const TOURNAMENT_REGISTRATION_MINUTES = 10;
 const TOURNAMENT_TROPHY_ID = '1545550040628461588';
 const TOURNAMENT_TROPHY_NAME = 'Trophy_fixed';
@@ -673,6 +674,10 @@ client.once('ready', async () => {
 
   try {
     const guild = await client.guilds.fetch(CONFIG.guildId);
+    const linkBypassRole = await ensureLinkBypassRole(guild);
+    const autoAssigned = await syncAutomaticLinkBypassMembers(guild, linkBypassRole);
+    console.log(`[AUTOMOD] Link Bypass role ready: ${linkBypassRole.name} (${linkBypassRole.id}) | auto-assigned to ${autoAssigned} staff member(s)`);
+
     const { channel, role } = await ensureTournamentInfrastructure(guild);
     if (state.tournaments?.active && ['finished', 'cancelled'].includes(state.tournaments.active.status)) {
       archiveTournament(state.tournaments.active);
@@ -833,9 +838,18 @@ client.on('guildMemberAdd', async member => {
     registerJoin(member);
     const assessment = evaluateAltRisk(member);
     if (assessment.score >= 25) await sendAltRiskLog(member, assessment, assessment.score >= CONFIG.altAlertThreshold);
+
+    // If a staff account rejoins with moderation permissions/roles already in
+    // place, make sure the persistent Link Bypass flag is restored instantly.
+    await autoGrantLinkBypassIfEligible(member).catch(error => console.error('[AUTOMOD] Link Bypass join sync failed:', error));
   } catch (error) {
     console.error('[ALT] Join assessment failed:', error);
   }
+});
+
+client.on('guildMemberUpdate', async (_oldMember, newMember) => {
+  if (newMember.guild.id !== CONFIG.guildId || newMember.user.bot) return;
+  await autoGrantLinkBypassIfEligible(newMember).catch(error => console.error('[AUTOMOD] Link Bypass member sync failed:', error));
 });
 
 client.on('guildMemberRemove', member => {
@@ -1589,7 +1603,15 @@ async function moderateMessage(message) {
   // Staff permissions only bypass the category Discord-link filter.
   const censorMatch = findCensorMatch(message.content);
   const channelPerms = message.channel?.permissionsFor?.(member);
-  const staffLinkBypass = member.permissions.has(PermissionFlagsBits.Administrator) || channelPerms?.has(PermissionFlagsBits.ManageMessages);
+  const hasLinkBypassRole = memberHasLinkBypassRole(member);
+  const staffLinkBypass = hasLinkBypassRole
+    || member.permissions.has(PermissionFlagsBits.Administrator)
+    || member.permissions.has(PermissionFlagsBits.ManageGuild)
+    || member.permissions.has(PermissionFlagsBits.ModerateMembers)
+    || member.permissions.has(PermissionFlagsBits.KickMembers)
+    || member.permissions.has(PermissionFlagsBits.BanMembers)
+    || member.permissions.has(PermissionFlagsBits.ManageMessages)
+    || channelPerms?.has(PermissionFlagsBits.ManageMessages);
   const linkCategoryExempt = channelIsInDiscordLinkExemptCategory(message.channel);
   const discordLink = !staffLinkBypass && !linkCategoryExempt && channelIsInLockdownCategory(message.channel) && containsDiscordLink(message.content);
   if (!censorMatch && !discordLink) return;
@@ -1636,6 +1658,85 @@ function channelIsInLockdownCategory(channel) {
 function channelIsInDiscordLinkExemptCategory(channel) {
   const categoryId = channelCategoryId(channel);
   return Boolean(categoryId && DISCORD_LINK_EXEMPT_CATEGORY_IDS.has(String(categoryId)));
+}
+
+function memberHasLinkBypassRole(member) {
+  if (!member?.roles?.cache) return false;
+  if (state.linkBypassRoleId && member.roles.cache.has(state.linkBypassRoleId)) return true;
+  return member.roles.cache.some(role => role.name.toLowerCase() === LINK_BYPASS_ROLE_NAME.toLowerCase());
+}
+
+function memberQualifiesForAutomaticLinkBypass(member) {
+  if (!member || member.user?.bot) return false;
+  if (member.id === member.guild?.ownerId) return true;
+
+  const permissions = member.permissions;
+  const hasStaffPermission = [
+    PermissionFlagsBits.Administrator,
+    PermissionFlagsBits.ManageGuild,
+    PermissionFlagsBits.ManageMessages,
+    PermissionFlagsBits.ModerateMembers,
+    PermissionFlagsBits.KickMembers,
+    PermissionFlagsBits.BanMembers,
+  ].some(permission => permissions.has(permission));
+  if (hasStaffPermission) return true;
+
+  // Some servers intentionally keep staff roles permission-light and perform
+  // moderation through bots. Recognise the common staff role names too.
+  return member.roles.cache.some(role => /^(?:admin(?:istrator)?|moderator|mod|staff|ticket staff|server management)$/i.test(role.name.trim()));
+}
+
+async function ensureLinkBypassRole(guild) {
+  let role = state.linkBypassRoleId ? guild.roles.cache.get(state.linkBypassRoleId) : null;
+  role ||= guild.roles.cache.find(r => r.name.toLowerCase() === LINK_BYPASS_ROLE_NAME.toLowerCase()) || null;
+
+  if (!role) {
+    role = await guild.roles.create({
+      name: LINK_BYPASS_ROLE_NAME,
+      permissions: [],
+      hoist: false,
+      mentionable: false,
+      reason: 'Auto-created role for Discord-link automod bypass',
+    });
+  }
+
+  if (state.linkBypassRoleId !== role.id) {
+    state.linkBypassRoleId = role.id;
+    saveState();
+  }
+  return role;
+}
+
+async function autoGrantLinkBypassIfEligible(member) {
+  if (!memberQualifiesForAutomaticLinkBypass(member)) return false;
+  const role = await ensureLinkBypassRole(member.guild);
+  if (member.roles.cache.has(role.id)) return false;
+  if (!role.editable) {
+    console.warn(`[AUTOMOD] Cannot auto-assign ${LINK_BYPASS_ROLE_NAME} to ${member.user.tag}: role is above/equal to the bot role.`);
+    return false;
+  }
+  await member.roles.add(role, 'Automatic Discord-link automod bypass for moderation staff');
+  return true;
+}
+
+async function syncAutomaticLinkBypassMembers(guild, role = null) {
+  const bypassRole = role || await ensureLinkBypassRole(guild);
+  const members = await guild.members.fetch().catch(() => guild.members.cache);
+  let added = 0;
+
+  for (const member of members.values()) {
+    if (!memberQualifiesForAutomaticLinkBypass(member) || member.roles.cache.has(bypassRole.id)) continue;
+    if (!bypassRole.editable) break;
+    const ok = await member.roles.add(bypassRole, 'Automatic Discord-link automod bypass for moderation staff')
+      .then(() => true)
+      .catch(error => {
+        console.warn(`[AUTOMOD] Could not assign ${LINK_BYPASS_ROLE_NAME} to ${member.user.tag}:`, error?.message || error);
+        return false;
+      });
+    if (ok) added += 1;
+  }
+
+  return added;
 }
 
 function containsDiscordLink(content) {
@@ -4777,7 +4878,7 @@ function stripEphemeralFlag(payload) {
 
 function loadState() {
   const defaults = {
-    version: 8,
+    version: 9,
     nextBaptismAt: null,
     lockdown: { active: false, channels: {} },
     warnings: {},
@@ -4790,6 +4891,7 @@ function loadState() {
     censorWarnCooldowns: {},
     dmPolls: {},
     pollResultsChannelId: null,
+    linkBypassRoleId: null,
     tournaments: {
       channelId: null,
       championRoleId: null,

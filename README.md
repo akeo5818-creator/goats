@@ -16,7 +16,7 @@ Standalone Discord.js moderation/security bot for the configured Bloxy server.
 - Persistent warning history, including automatic censor warnings with a 60-second per-user warning cooldown.
 - Persistent temporary bans with automatic expiry after bot restarts.
 - Server-wide custom censor list.
-- Discord links are automatically deleted from every channel/thread in category `1537689865267974192`.
+- Discord links are automatically deleted from every channel/thread in category `1537689865267974192` for normal users. A zero-permission `Link Bypass` role is auto-created; staff/moderators are auto-given it and anyone manually given that role also bypasses the link filter.
 - Suspicious new-account / possible-alt risk checks with admin alerts and logging.
 - Moderation log channel: `1537728472997306389`.
 - Incoming DM log channel: `1541705487052046408`. Incoming text, images/videos, files, and stickers are logged.
@@ -169,7 +169,7 @@ No emojis are used in the rotating statuses.
 
 Censor matching is case-insensitive and normalizes common leetspeak. Longer single words also catch simple punctuation/spacing bypasses such as `w.o.r.d`. Every censor hit deletes the message and automatically adds a warning, with a 60-second per-user warning cooldown to prevent instant warning spam.
 
-The censor applies to every non-bot member, including staff/admins. Staff with `Administrator` or `Manage Messages` only bypass the category Discord-link filter.
+The censor applies to every non-bot member, including staff/admins. The category Discord-link filter is bypassed by the auto-created **Link Bypass** role and by moderation-level permissions (`Administrator`, `Manage Guild`, `Manage Messages`, `Moderate Members`, `Kick Members`, or `Ban Members`). On startup and member-role updates, the bot automatically gives **Link Bypass** to recognised Admin/Moderator/Staff roles. The role has **no Discord permissions** of its own and can also be assigned manually to any trusted member. The censor still applies to staff/admins.
 
 ### Alt-risk checks
 - `/altcheck member`
