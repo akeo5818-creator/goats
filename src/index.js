@@ -44,6 +44,7 @@ function resolveDataDir() {
 const DATA_DIR = resolveDataDir();
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const LEGACY_STATE_FILE = path.join(LEGACY_DATA_DIR, 'state.json');
+const SCAM_EVIDENCE_DIR = path.join(DATA_DIR, 'scam-evidence');
 
 const CONFIG = {
   token: process.env.BOT_TOKEN,
@@ -175,6 +176,7 @@ if (!CONFIG.customerRoleId) {
 }
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(SCAM_EVIDENCE_DIR, { recursive: true });
 // If a Railway Volume has just been mounted, migrate the old local state once
 // so the first persistent deployment does not start from a blank database.
 if (STATE_FILE !== LEGACY_STATE_FILE && !fs.existsSync(STATE_FILE) && fs.existsSync(LEGACY_STATE_FILE)) {
@@ -670,6 +672,17 @@ const commands = [
       .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20))
       .addStringOption(o => o.setName('users').setDescription('Discord user IDs/mentions to remove. Separate with spaces, commas, or new lines.').setRequired(true).setMinLength(17).setMaxLength(1000)))
     .addSubcommand(s => s
+      .setName('addserver')
+      .setDescription('Add a server profile from an invite without exposing the invite publicly.')
+      .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20))
+      .addStringOption(o => o.setName('invite').setDescription('Discord invite URL/code used only to resolve the server profile.').setRequired(true).setMaxLength(300))
+      .addStringOption(o => o.setName('owner_id').setDescription('Optional server owner Discord user ID if the bot cannot determine it.').setMaxLength(25)))
+    .addSubcommand(s => s
+      .setName('removeserver')
+      .setDescription('Remove a related server profile from an alert.')
+      .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20))
+      .addStringOption(o => o.setName('server_id').setDescription('Discord server ID to remove.').setRequired(true).setMinLength(17).setMaxLength(20)))
+    .addSubcommand(s => s
       .setName('view')
       .setDescription('View a saved Scam Alert privately.')
       .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20)))
@@ -684,6 +697,36 @@ const commands = [
       .setName('delete')
       .setDescription('Delete an alert message and its saved record.')
       .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20)))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('evidence')
+    .setDescription('Add or manage evidence on a saved Scam Alert.')
+    .addSubcommand(s => s
+      .setName('add')
+      .setDescription('Add screenshots, links, or notes to a Scam Alert.')
+      .addStringOption(o => o.setName('scamid').setDescription('Pick the Scam Alert.').setRequired(true).setAutocomplete(true))
+      .addStringOption(o => o.setName('note').setDescription('Optional evidence note/context.').setMaxLength(1500))
+      .addStringOption(o => o.setName('links').setDescription('Optional evidence links, separated by spaces or new lines.').setMaxLength(1800))
+      .addAttachmentOption(o => o.setName('image1').setDescription('Evidence screenshot/image.'))
+      .addAttachmentOption(o => o.setName('image2').setDescription('Evidence screenshot/image.'))
+      .addAttachmentOption(o => o.setName('image3').setDescription('Evidence screenshot/image.'))
+      .addAttachmentOption(o => o.setName('image4').setDescription('Evidence screenshot/image.'))
+      .addAttachmentOption(o => o.setName('image5').setDescription('Evidence screenshot/image.'))
+      .addAttachmentOption(o => o.setName('image6').setDescription('Evidence screenshot/image.'))
+      .addAttachmentOption(o => o.setName('image7').setDescription('Evidence screenshot/image.'))
+      .addAttachmentOption(o => o.setName('image8').setDescription('Evidence screenshot/image.'))
+      .addAttachmentOption(o => o.setName('image9').setDescription('Evidence screenshot/image.'))
+      .addAttachmentOption(o => o.setName('image10').setDescription('Evidence screenshot/image.')))
+    .addSubcommand(s => s
+      .setName('remove')
+      .setDescription('Remove one evidence item from a Scam Alert.')
+      .addStringOption(o => o.setName('scamid').setDescription('Pick the Scam Alert.').setRequired(true).setAutocomplete(true))
+      .addIntegerOption(o => o.setName('number').setDescription('Evidence item number from /evidence list.').setRequired(true).setMinValue(1).setMaxValue(100)))
+    .addSubcommand(s => s
+      .setName('list')
+      .setDescription('List saved evidence on a Scam Alert.')
+      .addStringOption(o => o.setName('scamid').setDescription('Pick the Scam Alert.').setRequired(true).setAutocomplete(true)))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
@@ -737,6 +780,7 @@ client.once('ready', async () => {
   try {
     const guild = await client.guilds.fetch(CONFIG.guildId);
     const scamSetup = await ensureScamAlertsInfrastructure(guild);
+    await refreshSavedScamAlertsOnStartup();
     console.log(`[SCAM ALERTS] Ready: #${scamSetup.channel.name} | ${scamSetup.role.name} (${scamSetup.role.id})`);
   } catch (error) {
     console.error('[SCAM ALERTS] Auto-setup failed:', error);
@@ -967,6 +1011,10 @@ client.on('roleDelete', role => {
 
 client.on('interactionCreate', async interaction => {
   try {
+    if (interaction.isAutocomplete()) {
+      if (interaction.commandName === 'evidence') return handleEvidenceAutocomplete(interaction);
+      return;
+    }
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('dmpoll:')) return handleDmPollButton(interaction);
       if (interaction.customId.startsWith('tour:')) return handleTournamentButton(interaction);
@@ -1039,6 +1087,7 @@ client.on('interactionCreate', async interaction => {
       case 'faqrefresh': return handleFaqRefresh(interaction);
       case 'emojicheck': return handleEmojiCheck(interaction);
       case 'scamalert': return handleScamAlertCommand(interaction);
+      case 'evidence': return handleEvidenceCommand(interaction);
       case 'dmpollcreate': return handleDmPollCreate(interaction);
       case 'dmquestion': return handleDmQuestion(interaction);
       case 'dmquestionremove': return handleDmQuestionRemove(interaction);
@@ -4730,7 +4779,18 @@ async function ensureFaqChannel(guild) {
 
 function normalizeScamAlertsState(raw, defaults) {
   const value = raw && typeof raw === 'object' ? raw : {};
-  const alerts = value.alerts && typeof value.alerts === 'object' ? value.alerts : {};
+  const rawAlerts = value.alerts && typeof value.alerts === 'object' ? value.alerts : {};
+  const alerts = {};
+  for (const [id, record] of Object.entries(rawAlerts)) {
+    const alert = record && typeof record === 'object' ? record : {};
+    alerts[id] = {
+      ...alert,
+      id: alert.id || id,
+      relatedUsers: Array.isArray(alert.relatedUsers) ? alert.relatedUsers : [],
+      serverProfiles: Array.isArray(alert.serverProfiles) ? alert.serverProfiles : [],
+      evidenceItems: Array.isArray(alert.evidenceItems) ? alert.evidenceItems : [],
+    };
+  }
   const order = Array.isArray(value.order) ? value.order.filter(id => alerts[id]) : Object.keys(alerts);
   const highest = order.reduce((max, id) => {
     const m = String(id).match(/^SA-(\d+)$/i);
@@ -4779,14 +4839,152 @@ function parseScamUserIds(input) {
   return [...new Set(ids)].slice(0, 25);
 }
 
+function snowflakeCreatedAtMs(id) {
+  try {
+    return Number((BigInt(String(id)) >> 22n) + 1420070400000n);
+  } catch {
+    return null;
+  }
+}
+
 async function buildScamRelatedUser(userId, relation = null) {
-  const user = await client.users.fetch(userId).catch(() => null);
+  const user = await client.users.fetch(userId, { force: true }).catch(() => null);
+  const createdAt = user?.createdTimestamp || snowflakeCreatedAtMs(userId);
+  const fullUsername = user
+    ? (user.discriminator && user.discriminator !== '0' ? `${user.username}#${user.discriminator}` : user.username)
+    : null;
   return {
-    id: userId,
+    id: String(userId),
     username: user?.username || null,
+    fullUsername,
     globalName: user?.globalName || null,
+    avatarUrl: user?.displayAvatarURL?.({ size: 256 }) || null,
+    createdAt: createdAt || null,
     relation: relation ? String(relation).trim() : null,
   };
+}
+
+function extractUrls(input) {
+  return [...String(input || '').matchAll(/https?:\/\/[^\s<>]+/gi)].map(match => match[0].replace(/[),.;]+$/g, ''));
+}
+
+function isDiscordInviteUrl(value) {
+  return /(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\//i.test(String(value || ''));
+}
+
+function isLikelyImageUrl(value) {
+  const url = String(value || '');
+  return /(?:cdn\.discordapp\.com|media\.discordapp\.net)\/attachments\//i.test(url)
+    || /\.(?:png|jpe?g|gif|webp)(?:\?|#|$)/i.test(url);
+}
+
+function sanitizeEvidenceFileName(name) {
+  const base = String(name || 'evidence.png').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100) || 'evidence.png';
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${base}`;
+}
+
+async function saveScamEvidenceAttachment(alert, attachment, addedBy) {
+  if (!attachment?.url) throw new Error('Attachment URL is unavailable.');
+  if (attachment.contentType && !String(attachment.contentType).startsWith('image/')) {
+    throw new Error(`${attachment.name || 'Attachment'} is not an image.`);
+  }
+  const response = await fetch(attachment.url);
+  if (!response.ok) throw new Error(`Could not download ${attachment.name || 'evidence image'} (${response.status}).`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const alertDir = path.join(SCAM_EVIDENCE_DIR, alert.id);
+  fs.mkdirSync(alertDir, { recursive: true });
+  const fileName = sanitizeEvidenceFileName(attachment.name || 'evidence.png');
+  const filePath = path.join(alertDir, fileName);
+  fs.writeFileSync(filePath, bytes);
+  return {
+    id: `EV-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    type: 'image-file',
+    fileName,
+    originalName: attachment.name || fileName,
+    description: attachment.description || null,
+    addedAt: Date.now(),
+    addedBy: addedBy || null,
+  };
+}
+
+async function materializeRemoteScamEvidenceImages(alert) {
+  alert.evidenceItems ||= [];
+  let changed = false;
+  const alertDir = path.join(SCAM_EVIDENCE_DIR, alert.id);
+  fs.mkdirSync(alertDir, { recursive: true });
+  for (const item of alert.evidenceItems) {
+    if (item.type !== 'image-url' || !item.url) continue;
+    try {
+      const response = await fetch(item.url);
+      if (!response.ok) continue;
+      const contentType = String(response.headers.get('content-type') || '');
+      if (contentType && !contentType.startsWith('image/')) continue;
+      const urlName = (() => {
+        try { return decodeURIComponent(new URL(item.url).pathname.split('/').pop() || 'evidence.png'); }
+        catch { return 'evidence.png'; }
+      })();
+      const fileName = sanitizeEvidenceFileName(urlName);
+      fs.writeFileSync(path.join(alertDir, fileName), Buffer.from(await response.arrayBuffer()));
+      item.type = 'image-file';
+      item.fileName = fileName;
+      item.originalName = urlName;
+      delete item.url;
+      changed = true;
+    } catch {
+      // Keep the original URL if Discord/CDN download is temporarily unavailable.
+    }
+  }
+  return changed;
+}
+
+async function buildScamServerProfile(inviteInput, ownerId = null) {
+  const raw = String(inviteInput || '').trim();
+  const invite = await client.fetchInvite(raw, { withCounts: true, withExpiration: true }).catch(() => null);
+  if (!invite?.guild) return null;
+  const guildLike = invite.guild;
+  let sharedGuild = client.guilds.cache.get(guildLike.id) || null;
+  if (!sharedGuild) sharedGuild = await client.guilds.fetch(guildLike.id).catch(() => null);
+  let resolvedOwnerId = ownerId ? String(ownerId).match(/\d{17,20}/)?.[0] || null : null;
+  if (!resolvedOwnerId && sharedGuild?.ownerId) resolvedOwnerId = sharedGuild.ownerId;
+  if (!resolvedOwnerId && sharedGuild?.fetchOwner) {
+    const owner = await sharedGuild.fetchOwner().catch(() => null);
+    resolvedOwnerId = owner?.id || null;
+  }
+  const owner = resolvedOwnerId ? await buildScamRelatedUser(resolvedOwnerId) : null;
+  const iconUrl = typeof guildLike.iconURL === 'function' ? guildLike.iconURL({ size: 256 }) : null;
+  return {
+    id: guildLike.id,
+    name: guildLike.name || `Discord Server ${guildLike.id}`,
+    iconUrl,
+    description: guildLike.description || null,
+    createdAt: snowflakeCreatedAtMs(guildLike.id),
+    approximateMemberCount: invite.approximateMemberCount ?? null,
+    approximatePresenceCount: invite.approximatePresenceCount ?? null,
+    owner: owner ? { id: owner.id, username: owner.username, fullUsername: owner.fullUsername, globalName: owner.globalName, createdAt: owner.createdAt } : null,
+    resolvedAt: Date.now(),
+  };
+}
+
+async function resolveScamServerProfilesFromText(alert, input, ownerId = null) {
+  const text = String(input || '').trim();
+  if (!text) return { added: 0, remainingText: null };
+  const inviteUrls = extractUrls(text).filter(isDiscordInviteUrl);
+  alert.serverProfiles ||= [];
+  let added = 0;
+  for (const inviteUrl of inviteUrls) {
+    const profile = await buildScamServerProfile(inviteUrl, ownerId);
+    if (!profile) continue;
+    const existingIndex = alert.serverProfiles.findIndex(server => server.id === profile.id);
+    if (existingIndex >= 0) alert.serverProfiles[existingIndex] = { ...alert.serverProfiles[existingIndex], ...profile };
+    else {
+      alert.serverProfiles.push(profile);
+      added++;
+    }
+  }
+  let remainingText = text;
+  for (const inviteUrl of inviteUrls) remainingText = remainingText.replaceAll(inviteUrl, '');
+  remainingText = remainingText.replace(/\s{2,}/g, ' ').replace(/^[\s,;|-]+|[\s,;|-]+$/g, '').trim();
+  return { added, remainingText: remainingText || null };
 }
 
 function getScamAlert(id) {
@@ -4799,18 +4997,96 @@ function scamAlertMessageUrl(alert) {
   return `https://discord.com/channels/${CONFIG.guildId}/${CONFIG.scamAlertsChannelId}/${alert.messageId}`;
 }
 
+async function refreshScamAlertProfiles(alert) {
+  let changed = false;
+  alert.relatedUsers ||= [];
+  for (let i = 0; i < alert.relatedUsers.length; i++) {
+    const old = alert.relatedUsers[i];
+    const fresh = await buildScamRelatedUser(old.id, old.relation);
+    if (JSON.stringify(old) !== JSON.stringify(fresh)) changed = true;
+    alert.relatedUsers[i] = { ...old, ...fresh, relation: old.relation || fresh.relation || null };
+  }
+  if (alert.servers && extractUrls(alert.servers).some(isDiscordInviteUrl)) {
+    const resolved = await resolveScamServerProfilesFromText(alert, alert.servers);
+    alert.servers = resolved.remainingText;
+    changed = true;
+  }
+  alert.serverProfiles ||= [];
+  for (let i = 0; i < alert.serverProfiles.length; i++) {
+    const existing = alert.serverProfiles[i];
+    if (existing.owner?.id) {
+      const owner = await buildScamRelatedUser(existing.owner.id);
+      alert.serverProfiles[i].owner = { ...existing.owner, id: owner.id, username: owner.username, fullUsername: owner.fullUsername, globalName: owner.globalName, createdAt: owner.createdAt };
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function migrateLegacyEvidence(alert) {
+  alert.evidenceItems ||= [];
+  const raw = String(alert.evidence || '').trim();
+  if (!raw) return false;
+  const urls = extractUrls(raw);
+  const known = new Set(alert.evidenceItems.map(item => item.url || item.text || item.fileName));
+  for (const url of urls) {
+    if (known.has(url)) continue;
+    if (isDiscordInviteUrl(url)) continue;
+    alert.evidenceItems.push({
+      id: `EV-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      type: isLikelyImageUrl(url) ? 'image-url' : 'link',
+      url,
+      addedAt: alert.createdAt || Date.now(),
+      addedBy: alert.createdBy || null,
+    });
+  }
+  let remainder = raw;
+  for (const url of urls) remainder = remainder.replaceAll(url, '');
+  remainder = remainder.replace(/\s{2,}/g, ' ').trim();
+  if (remainder) alert.evidenceItems.push({
+    id: `EV-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    type: 'note',
+    text: remainder,
+    addedAt: alert.createdAt || Date.now(),
+    addedBy: alert.createdBy || null,
+  });
+  alert.evidence = null;
+  return true;
+}
+
 function formatScamRelatedUsers(alert) {
   const users = Array.isArray(alert.relatedUsers) ? alert.relatedUsers : [];
   if (!users.length) return 'No related Discord accounts have been added.';
   return users.map((user, index) => {
-    const name = user.globalName || user.username;
-    const label = name ? `**${index + 1}. ${escapeMassMentions(name)}**` : `**${index + 1}. Discord Account**`;
-    const relation = user.relation ? ` - ${escapeMassMentions(user.relation)}` : '';
-    return `${label}\n<@${user.id}> - ID: \`${user.id}\`${relation}`;
+    const username = user.fullUsername || user.username || 'Unknown username';
+    const display = user.globalName && user.globalName !== user.username ? `\n**Display Name:** ${escapeMassMentions(user.globalName)}` : '';
+    const created = user.createdAt ? `<t:${Math.floor(user.createdAt / 1000)}:F> (<t:${Math.floor(user.createdAt / 1000)}:R>)` : 'Unknown';
+    const relation = user.relation ? `\n**Relation:** ${escapeMassMentions(user.relation)}` : '';
+    return `### ${index + 1}. ${escapeMassMentions(username)}\n**Username:** \`${escapeMassMentions(username)}\`${display}\n**User:** <@${user.id}>\n**User ID:** \`${user.id}\`\n**Account Created:** ${created}${relation}`;
   }).join('\n\n');
 }
 
+function formatScamServerProfiles(alert) {
+  const profiles = Array.isArray(alert.serverProfiles) ? alert.serverProfiles : [];
+  const sections = [];
+  profiles.forEach((server, index) => {
+    const owner = server.owner?.id
+      ? `${server.owner.fullUsername ? `\`${escapeMassMentions(server.owner.fullUsername)}\` - ` : ''}<@${server.owner.id}> (\`${server.owner.id}\`)`
+      : 'Not available from the invite. Use `/scamalert addserver` with `owner_id` to set it.';
+    const created = server.createdAt ? `<t:${Math.floor(server.createdAt / 1000)}:F> (<t:${Math.floor(server.createdAt / 1000)}:R>)` : 'Unknown';
+    const counts = [
+      server.approximateMemberCount != null ? `**Members:** ${Number(server.approximateMemberCount).toLocaleString()}` : null,
+      server.approximatePresenceCount != null ? `**Online:** ${Number(server.approximatePresenceCount).toLocaleString()}` : null,
+    ].filter(Boolean).join('\n');
+    sections.push(`### ${index + 1}. ${escapeMassMentions(server.name || 'Discord Server')}\n**Server ID:** \`${server.id}\`\n**Owned By:** ${owner}\n**Server Created:** ${created}${counts ? `\n${counts}` : ''}${server.description ? `\n**About:** ${escapeMassMentions(server.description)}` : ''}`);
+  });
+  const remaining = String(alert.servers || '').trim();
+  if (remaining) sections.push(`### Other Reported Communities\n${escapeMassMentions(remaining)}`);
+  return sections.length ? sections.join('\n\n') : null;
+}
+
 function makeScamAlertPayload(alert) {
+  migrateLegacyEvidence(alert);
   const alertEmoji = customEmojiText('alert');
   const statusLabel = ({ active: 'ACTIVE', resolved: 'RESOLVED', archived: 'ARCHIVED' })[alert.status] || String(alert.status || 'ACTIVE').toUpperCase();
   const container = new ContainerBuilder().addTextDisplayComponents(
@@ -4819,8 +5095,45 @@ function makeScamAlertPayload(alert) {
     new TextDisplayBuilder().setContent(`## What they do\n${escapeMassMentions(alert.activity || 'Not provided.')}`),
   );
 
-  if (alert.servers) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Servers / Communities\n${escapeMassMentions(alert.servers)}`));
-  if (alert.evidence) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Evidence / References\n${escapeMassMentions(alert.evidence)}`));
+  const serverText = formatScamServerProfiles(alert);
+  if (serverText) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Servers / Communities\n${serverText}`));
+  const serverIcons = (alert.serverProfiles || []).filter(server => server.iconUrl).slice(0, 10);
+  if (serverIcons.length) {
+    const serverGallery = new MediaGalleryBuilder();
+    for (const server of serverIcons) {
+      serverGallery.addItems(new MediaGalleryItemBuilder().setURL(server.iconUrl).setDescription(`Server profile - ${server.name || server.id}`));
+    }
+    container.addMediaGalleryComponents(serverGallery);
+  }
+
+  const evidenceItems = Array.isArray(alert.evidenceItems) ? alert.evidenceItems : [];
+  const textualEvidence = evidenceItems.filter(item => ['note', 'link'].includes(item.type));
+  if (textualEvidence.length) {
+    const lines = textualEvidence.slice(0, 40).map((item, index) => {
+      if (item.type === 'note') return `**${index + 1}. Note:** ${escapeMassMentions(item.text || '')}`;
+      return `**${index + 1}. Reference:** ${item.url}`;
+    });
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Evidence / References\n${lines.join('\n')}`));
+  }
+
+  const files = [];
+  const imageItems = evidenceItems.filter(item => ['image-file', 'image-url'].includes(item.type)).slice(0, 30);
+  for (let offset = 0; offset < imageItems.length; offset += 10) {
+    const gallery = new MediaGalleryBuilder();
+    for (const item of imageItems.slice(offset, offset + 10)) {
+      if (item.type === 'image-file' && item.fileName) {
+        const localPath = path.join(SCAM_EVIDENCE_DIR, alert.id, item.fileName);
+        if (!fs.existsSync(localPath)) continue;
+        const uploadName = `${alert.id}-${item.fileName}`.slice(-120);
+        files.push(new AttachmentBuilder(localPath, { name: uploadName }));
+        gallery.addItems(new MediaGalleryItemBuilder().setURL(`attachment://${uploadName}`).setDescription(item.originalName || 'Scam alert evidence'));
+      } else if (item.type === 'image-url' && item.url) {
+        gallery.addItems(new MediaGalleryItemBuilder().setURL(item.url).setDescription('Scam alert evidence'));
+      }
+    }
+    if (gallery.data?.items?.length || gallery.toJSON?.().items?.length) container.addMediaGalleryComponents(gallery);
+  }
+
   if (alert.notes) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Additional Notes\n${escapeMassMentions(alert.notes)}`));
   container.addTextDisplayComponents(new TextDisplayBuilder().setContent('-# This is a staff-submitted safety alert. Review the listed evidence and context before taking action.'));
 
@@ -4831,20 +5144,42 @@ function makeScamAlertPayload(alert) {
       .setEmoji(customEmojiComponent('alert'))
       .setStyle(ButtonStyle.Secondary)
   );
-  return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+  return { components: [container, row], files, flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
 }
 
 async function ghostPingScamAlertsRole(channel, role) {
-  const ping = await channel.send({
-    content: `<@&${role.id}>`,
-    allowedMentions: { roles: [role.id] },
-  }).catch(() => null);
-  if (ping) setTimeout(() => ping.delete().catch(() => {}), 1200).unref?.();
+  let toggledMentionable = false;
+  try {
+    if (!role.mentionable) {
+      await role.setMentionable(true, 'Temporary mentionability for Scam Alert notification');
+      toggledMentionable = true;
+    }
+    const ping = await channel.send({
+      content: `<@&${role.id}>`,
+      allowedMentions: { parse: [], roles: [role.id] },
+    });
+    setTimeout(() => ping.delete().catch(() => {}), 1500).unref?.();
+  } catch (error) {
+    console.error('[SCAM ALERTS] Notification ping failed:', error);
+  } finally {
+    if (toggledMentionable) await role.setMentionable(false, 'Restore Scam alerts role to non-mentionable').catch(() => {});
+  }
+}
+
+async function prepareScamAlertForRender(alert) {
+  const legacyChanged = migrateLegacyEvidence(alert);
+  const imageChanged = await materializeRemoteScamEvidenceImages(alert);
+  const profileChanged = await refreshScamAlertProfiles(alert);
+  if (legacyChanged || imageChanged || profileChanged) {
+    alert.updatedAt = Date.now();
+    saveState();
+  }
 }
 
 async function postScamAlert(alert, { notify = true, replaceOld = false } = {}) {
   const guild = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId);
   const { channel, role } = await ensureScamAlertsInfrastructure(guild);
+  await prepareScamAlertForRender(alert);
   if (replaceOld && alert.messageId) {
     const old = await channel.messages.fetch(alert.messageId).catch(() => null);
     if (old) await old.delete().catch(() => {});
@@ -4861,12 +5196,131 @@ async function postScamAlert(alert, { notify = true, replaceOld = false } = {}) 
 async function refreshScamAlertMessage(alert) {
   const guild = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId);
   const { channel } = await ensureScamAlertsInfrastructure(guild);
+  await prepareScamAlertForRender(alert);
   let message = alert.messageId ? await channel.messages.fetch(alert.messageId).catch(() => null) : null;
   if (!message) return postScamAlert(alert, { notify: false });
-  await message.edit(makeScamAlertPayload(alert));
+  const payload = makeScamAlertPayload(alert);
+  await message.edit({ ...payload, attachments: [] });
   alert.updatedAt = Date.now();
   saveState();
   return message;
+}
+
+async function refreshSavedScamAlertsOnStartup() {
+  state.scamAlerts = normalizeScamAlertsState(state.scamAlerts, { channelId: CONFIG.scamAlertsChannelId, roleId: null, nextNumber: 1, alerts: {}, order: [] });
+  const ids = (state.scamAlerts.order || []).filter(id => state.scamAlerts.alerts[id]);
+  for (const id of ids) {
+    const alert = state.scamAlerts.alerts[id];
+    try {
+      await refreshScamAlertMessage(alert);
+    } catch (error) {
+      console.error(`[SCAM ALERTS] Could not refresh ${id} on startup:`, error?.message || error);
+    }
+  }
+}
+
+async function handleEvidenceAutocomplete(interaction) {
+  if (interaction.guildId !== CONFIG.guildId) return interaction.respond([]).catch(() => {});
+  const focused = String(interaction.options.getFocused() || '').toLowerCase();
+  const ids = (state.scamAlerts?.order || []).filter(id => state.scamAlerts?.alerts?.[id]);
+  const choices = ids
+    .map(id => state.scamAlerts.alerts[id])
+    .filter(alert => !focused || alert.id.toLowerCase().includes(focused) || String(alert.title || '').toLowerCase().includes(focused))
+    .slice(0, 25)
+    .map(alert => ({ name: `${alert.id} - ${String(alert.title || 'Scam Alert').slice(0, 80)}`.slice(0, 100), value: alert.id }));
+  return interaction.respond(choices);
+}
+
+function evidenceItemLabel(item, index) {
+  if (item.type === 'image-file') return `${index + 1}. Image - ${item.originalName || item.fileName || 'screenshot'}`;
+  if (item.type === 'image-url') return `${index + 1}. Image URL - ${truncate(item.url || '', 100)}`;
+  if (item.type === 'link') return `${index + 1}. Link - ${truncate(item.url || '', 100)}`;
+  return `${index + 1}. Note - ${truncate(item.text || '', 120)}`;
+}
+
+async function handleEvidenceCommand(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  const sub = interaction.options.getSubcommand();
+  const alert = getScamAlert(interaction.options.getString('scamid', true));
+  if (!alert) return fail(interaction, 'Alert Not Found', 'Pick a valid Scam Alert from the `scamid` options.');
+  alert.evidenceItems ||= [];
+
+  if (sub === 'list') {
+    migrateLegacyEvidence(alert);
+    const items = alert.evidenceItems;
+    const description = items.length ? items.map(evidenceItemLabel).join('\n') : 'No evidence items have been added yet.';
+    return interaction.reply(v2Payload({ title: `${customEmojiText('alert')} Evidence - ${alert.id}`, description: truncate(description, 3500), ephemeral: true }));
+  }
+
+  if (sub === 'remove') {
+    migrateLegacyEvidence(alert);
+    const number = interaction.options.getInteger('number', true);
+    const index = number - 1;
+    const item = alert.evidenceItems[index];
+    if (!item) return fail(interaction, 'Evidence Not Found', `There is no evidence item #${number} on ${alert.id}.`);
+    if (item.type === 'image-file' && item.fileName) {
+      fs.rmSync(path.join(SCAM_EVIDENCE_DIR, alert.id, item.fileName), { force: true });
+    }
+    alert.evidenceItems.splice(index, 1);
+    alert.updatedAt = Date.now();
+    alert.updatedBy = interaction.user.id;
+    saveState();
+    const message = await refreshScamAlertMessage(alert);
+    return interaction.reply(v2Payload({ title: 'Evidence Removed', description: `Removed evidence #${number} from **${alert.id}**.\n\n[Open alert](${message.url})`, ephemeral: true }));
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  migrateLegacyEvidence(alert);
+  const note = interaction.options.getString('note')?.trim() || null;
+  const linksRaw = interaction.options.getString('links')?.trim() || null;
+  const attachments = [];
+  for (let i = 1; i <= 10; i++) {
+    const attachment = interaction.options.getAttachment(`image${i}`);
+    if (attachment) attachments.push(attachment);
+  }
+  if (!note && !linksRaw && !attachments.length) {
+    return interaction.editReply(v2Edit({ title: 'No Evidence Provided', description: 'Add at least one note, link, or image.' }));
+  }
+
+  let added = 0;
+  let serverProfilesAdded = 0;
+  if (note) {
+    alert.evidenceItems.push({ id: `EV-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, type: 'note', text: note, addedAt: Date.now(), addedBy: interaction.user.id });
+    added++;
+  }
+  if (linksRaw) {
+    for (const url of extractUrls(linksRaw).slice(0, 30)) {
+      if (isDiscordInviteUrl(url)) {
+        const resolved = await resolveScamServerProfilesFromText(alert, url);
+        serverProfilesAdded += resolved.added;
+        continue;
+      }
+      const duplicate = alert.evidenceItems.some(item => item.url === url);
+      if (duplicate) continue;
+      alert.evidenceItems.push({ id: `EV-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, type: isLikelyImageUrl(url) ? 'image-url' : 'link', url, addedAt: Date.now(), addedBy: interaction.user.id });
+      added++;
+    }
+  }
+  const attachmentErrors = [];
+  for (const attachment of attachments) {
+    try {
+      const item = await saveScamEvidenceAttachment(alert, attachment, interaction.user.id);
+      alert.evidenceItems.push(item);
+      added++;
+    } catch (error) {
+      attachmentErrors.push(`${attachment.name || 'Attachment'}: ${error.message}`);
+    }
+  }
+
+  if (!added && !serverProfilesAdded) {
+    return interaction.editReply(v2Edit({ title: 'Nothing Added', description: attachmentErrors.length ? attachmentErrors.join('\n') : 'No new evidence was found in the provided values.' }));
+  }
+  alert.updatedAt = Date.now();
+  alert.updatedBy = interaction.user.id;
+  saveState();
+  const message = await refreshScamAlertMessage(alert);
+  const errors = attachmentErrors.length ? `\n\n**Skipped:**\n${attachmentErrors.map(x => `- ${x}`).join('\n')}` : '';
+  return interaction.editReply(v2Edit({ title: 'Evidence Added', description: `Added **${added}** evidence item(s) to **${alert.id}**.${serverProfilesAdded ? `\nResolved **${serverProfilesAdded}** server profile(s) without exposing invite links.` : ''}${errors}\n\n[Open alert](${message.url})` }));
 }
 
 async function handleScamAlertButton(interaction) {
@@ -4914,6 +5368,8 @@ async function handleScamAlertCommand(interaction) {
       activity: interaction.options.getString('what_they_do', true).trim(),
       servers: interaction.options.getString('servers')?.trim() || null,
       evidence: interaction.options.getString('evidence')?.trim() || null,
+      evidenceItems: [],
+      serverProfiles: [],
       notes: interaction.options.getString('notes')?.trim() || null,
       relatedUsers,
       status: 'active',
@@ -4922,6 +5378,11 @@ async function handleScamAlertCommand(interaction) {
       updatedAt: Date.now(),
       messageId: null,
     };
+    if (alert.servers) {
+      const resolved = await resolveScamServerProfilesFromText(alert, alert.servers);
+      alert.servers = resolved.remainingText;
+    }
+    migrateLegacyEvidence(alert);
     state.scamAlerts.alerts[id] = alert;
     state.scamAlerts.order.unshift(id);
     saveState();
@@ -5014,6 +5475,40 @@ async function handleScamAlertCommand(interaction) {
       description: `${removedLines}\n\nRemoved from **${alert.id}**.${skippedText}\n\n**Total related users:** ${alert.relatedUsers.length}\n[Open alert](${message.url})`,
       ephemeral: true,
     }));
+  }
+
+  if (sub === 'addserver') {
+    const alert = getScamAlert(interaction.options.getString('id', true));
+    if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const invite = interaction.options.getString('invite', true).trim();
+    const ownerId = interaction.options.getString('owner_id')?.trim() || null;
+    const profile = await buildScamServerProfile(invite, ownerId);
+    if (!profile) return interaction.editReply(v2Edit({ title: 'Server Could Not Be Resolved', description: 'That invite could not be resolved. Make sure it is valid and the bot can access Discord invite metadata.' }));
+    alert.serverProfiles ||= [];
+    const existingIndex = alert.serverProfiles.findIndex(server => server.id === profile.id);
+    if (existingIndex >= 0) alert.serverProfiles[existingIndex] = { ...alert.serverProfiles[existingIndex], ...profile };
+    else alert.serverProfiles.push(profile);
+    alert.updatedAt = Date.now();
+    alert.updatedBy = interaction.user.id;
+    saveState();
+    const message = await refreshScamAlertMessage(alert);
+    return interaction.editReply(v2Edit({ title: 'Server Profile Added', description: `Added **${escapeMassMentions(profile.name)}** (\`${profile.id}\`) to **${alert.id}**. The invite URL is not shown publicly.\n\n[Open alert](${message.url})` }));
+  }
+
+  if (sub === 'removeserver') {
+    const alert = getScamAlert(interaction.options.getString('id', true));
+    if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
+    const serverId = interaction.options.getString('server_id', true).trim();
+    alert.serverProfiles ||= [];
+    const before = alert.serverProfiles.length;
+    alert.serverProfiles = alert.serverProfiles.filter(server => server.id !== serverId);
+    if (alert.serverProfiles.length === before) return fail(interaction, 'Server Not Listed', `Server ID \`${serverId}\` is not listed on ${alert.id}.`);
+    alert.updatedAt = Date.now();
+    alert.updatedBy = interaction.user.id;
+    saveState();
+    const message = await refreshScamAlertMessage(alert);
+    return interaction.reply(v2Payload({ title: 'Server Profile Removed', description: `Removed server \`${serverId}\` from **${alert.id}**.\n\n[Open alert](${message.url})`, ephemeral: true }));
   }
 
   if (sub === 'view') {
@@ -5300,7 +5795,7 @@ function stripEphemeralFlag(payload) {
 
 function loadState() {
   const defaults = {
-    version: 10,
+    version: 11,
     nextBaptismAt: null,
     lockdown: { active: false, channels: {} },
     warnings: {},

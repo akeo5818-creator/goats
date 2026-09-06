@@ -321,3 +321,16 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 ## v2.12 Scam Alert multi-user update
 
 `/scamalert create` and `/scamalert adduser` accept multiple Discord IDs or mentions at once, separated by spaces, commas, or new lines. `/scamalert removeuser` can also remove multiple related accounts in one command. Up to 25 unique IDs are processed per command.
+
+
+## v2.13 Scam Alert upgrades
+
+- Scam Alerts notification role is temporarily made mentionable for a real ghost ping, then locked again.
+- Evidence screenshots render directly inside the Components V2 alert.
+- `/evidence add` lets staff pick a Scam Alert using autocomplete and add up to 10 screenshots plus links/notes.
+- `/evidence list` and `/evidence remove` manage saved evidence.
+- Discord invite links supplied as related servers are resolved into a server profile and are not shown publicly.
+- `/scamalert addserver` can resolve a server profile from an invite and optionally set the owner user ID.
+- Related users display full username, display name, user ID, and account creation date.
+- Related server profiles display server name, server ID, creation date, owner when available/provided, approximate member/online counts, and description when Discord exposes it.
+- Existing saved Scam Alerts are refreshed on startup to migrate old evidence links and update account details.
