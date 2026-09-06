@@ -197,11 +197,15 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildModeration,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildInvites,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
   ],
   partials: [Partials.Channel],
 });
+
+const inviteSnapshot = new Map();
+let inviteDetectionQueue = Promise.resolve();
 
 const commands = [
   new SlashCommandBuilder()
@@ -395,6 +399,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('serverstats')
     .setDescription('Show live server totals and recorded join/leave statistics.'),
+
+  new SlashCommandBuilder()
+    .setName('membercount')
+    .setDescription('Show the current server member count and customer totals.'),
 
   new SlashCommandBuilder()
     .setName('servergraph')
@@ -730,6 +738,36 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
+    .setName('invites')
+    .setDescription('View invite stats for yourself or another member.')
+    .addUserOption(o => o.setName('user').setDescription('Member to inspect. Defaults to you.')),
+
+  new SlashCommandBuilder()
+    .setName('invitelinks')
+    .setDescription('View invite links created by you or another member.')
+    .addUserOption(o => o.setName('user').setDescription('Member to inspect. Defaults to you.')),
+
+  new SlashCommandBuilder()
+    .setName('inviteleaderboard')
+    .setDescription('Show the server invite leaderboard.')
+    .addIntegerOption(o => o.setName('limit').setDescription('How many inviters to show.').setMinValue(3).setMaxValue(20)),
+
+  new SlashCommandBuilder()
+    .setName('invitedby')
+    .setDescription('See which tracked invite brought a member into the server.')
+    .addUserOption(o => o.setName('member').setDescription('Member to check.').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('invitehistory')
+    .setDescription('View members who joined through your invite links.')
+    .addUserOption(o => o.setName('user').setDescription('Member to inspect. Defaults to you.')),
+
+  new SlashCommandBuilder()
+    .setName('inviterefresh')
+    .setDescription('Rescan all active server invites into the tracker.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
     .setName('dmall')
     .setDescription('DM a plain-text announcement to all members or one role.')
     .addStringOption(o => o.setName('message').setDescription('Plain-text message to send.').setRequired(true).setMinLength(1).setMaxLength(2000))
@@ -766,6 +804,16 @@ client.once('ready', async () => {
   setInterval(checkTempBans, 60_000).unref();
   await checkBaptismSchedule();
   await checkTempBans();
+
+  // Build the invite snapshot before new joins are processed so the bot can
+  // identify exactly which member-created invite code gained a use.
+  try {
+    const guild = await client.guilds.fetch(CONFIG.guildId);
+    const count = await initializeInviteTracking(guild);
+    console.log(`[INVITES] Tracking ${count} active invite link(s).`);
+  } catch (error) {
+    console.error('[INVITES] Initial invite snapshot failed:', error);
+  }
 
   // Keep DM poll analytics zero-setup. The private results channel is created
   // as soon as the bot is ready, even before the first poll is broadcast.
@@ -814,6 +862,389 @@ client.once('ready', async () => {
   await checkTournamentTurnTimers();
   await checkChatDrops();
 });
+
+
+function normalizeInviteTrackingState(raw, defaults) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const invites = source.invites && typeof source.invites === 'object' && !Array.isArray(source.invites) ? source.invites : {};
+  const joins = Array.isArray(source.joins) ? source.joins : [];
+  const memberSources = source.memberSources && typeof source.memberSources === 'object' && !Array.isArray(source.memberSources) ? source.memberSources : {};
+  return {
+    ...defaults,
+    ...source,
+    initializedAt: source.initializedAt || null,
+    lastSnapshotAt: source.lastSnapshotAt || null,
+    invites,
+    joins: joins.slice(-100000),
+    memberSources,
+  };
+}
+
+function ensureInviteTrackingState() {
+  if (!state.inviteTracking || typeof state.inviteTracking !== 'object') {
+    state.inviteTracking = { initializedAt: null, lastSnapshotAt: null, invites: {}, joins: [], memberSources: {} };
+  }
+  if (!state.inviteTracking.invites || typeof state.inviteTracking.invites !== 'object') state.inviteTracking.invites = {};
+  if (!Array.isArray(state.inviteTracking.joins)) state.inviteTracking.joins = [];
+  if (!state.inviteTracking.memberSources || typeof state.inviteTracking.memberSources !== 'object') state.inviteTracking.memberSources = {};
+  return state.inviteTracking;
+}
+
+function inviteExpiresAt(invite) {
+  if (Number.isFinite(invite?.expiresTimestamp)) return invite.expiresTimestamp;
+  const created = Number(invite?.createdTimestamp || 0);
+  const maxAge = Number(invite?.maxAge || 0);
+  return created && maxAge > 0 ? created + maxAge * 1000 : null;
+}
+
+function rememberInvite(invite, active = true) {
+  if (!invite?.code) return null;
+  const tracking = ensureInviteTrackingState();
+  const code = String(invite.code);
+  const previous = tracking.invites[code] || {};
+  const record = {
+    ...previous,
+    code,
+    creatorId: invite.inviter?.id || previous.creatorId || null,
+    creatorUsername: invite.inviter?.username || previous.creatorUsername || null,
+    channelId: invite.channelId || invite.channel?.id || previous.channelId || null,
+    createdAt: invite.createdTimestamp || previous.createdAt || Date.now(),
+    uses: Number.isFinite(invite.uses) ? invite.uses : Number(previous.uses || 0),
+    maxUses: Number.isFinite(invite.maxUses) ? invite.maxUses : Number(previous.maxUses || 0),
+    maxAge: Number.isFinite(invite.maxAge) ? invite.maxAge : Number(previous.maxAge || 0),
+    temporary: Boolean(invite.temporary),
+    expiresAt: inviteExpiresAt(invite) || previous.expiresAt || null,
+    active,
+    deletedAt: active ? null : (previous.deletedAt || Date.now()),
+    lastSeenAt: Date.now(),
+  };
+  tracking.invites[code] = record;
+  return record;
+}
+
+function updateInviteSnapshotEntry(invite) {
+  if (!invite?.code) return;
+  inviteSnapshot.set(String(invite.code), {
+    code: String(invite.code),
+    uses: Number(invite.uses || 0),
+    maxUses: Number(invite.maxUses || 0),
+    creatorId: invite.inviter?.id || state.inviteTracking?.invites?.[invite.code]?.creatorId || null,
+    creatorUsername: invite.inviter?.username || state.inviteTracking?.invites?.[invite.code]?.creatorUsername || null,
+    channelId: invite.channelId || invite.channel?.id || null,
+    createdAt: invite.createdTimestamp || Date.now(),
+  });
+}
+
+async function initializeInviteTracking(guild) {
+  const tracking = ensureInviteTrackingState();
+  const invites = await guild.invites.fetch();
+  inviteSnapshot.clear();
+  const activeCodes = new Set();
+  for (const invite of invites.values()) {
+    activeCodes.add(invite.code);
+    rememberInvite(invite, true);
+    updateInviteSnapshotEntry(invite);
+  }
+  // Only mark an old invite inactive when Discord's fresh full fetch no longer
+  // contains it. This preserves creator/history data for deleted/expired links.
+  for (const [code, record] of Object.entries(tracking.invites)) {
+    if (record?.active && !activeCodes.has(code)) {
+      record.active = false;
+      record.deletedAt ||= Date.now();
+    }
+  }
+  tracking.initializedAt ||= Date.now();
+  tracking.lastSnapshotAt = Date.now();
+  saveState();
+  return invites.size;
+}
+
+async function refreshInviteSnapshot(guild) {
+  return initializeInviteTracking(guild);
+}
+
+function recordInviteJoin(member, source) {
+  const tracking = ensureInviteTrackingState();
+  const join = {
+    id: `IJ-${Date.now().toString(36).toUpperCase()}-${makeId()}`,
+    memberId: member.id,
+    memberUsername: member.user?.username || null,
+    memberDisplayName: member.displayName || member.user?.globalName || null,
+    inviterId: source.creatorId || null,
+    inviterUsername: source.creatorUsername || null,
+    code: source.code || null,
+    channelId: source.channelId || null,
+    joinedAt: Date.now(),
+    leftAt: null,
+  };
+  tracking.joins.push(join);
+  tracking.joins = tracking.joins.slice(-100000);
+  tracking.memberSources[member.id] = join.id;
+  return join;
+}
+
+function markInviteJoinLeft(memberId) {
+  const tracking = ensureInviteTrackingState();
+  for (let i = tracking.joins.length - 1; i >= 0; i--) {
+    const join = tracking.joins[i];
+    if (join?.memberId === memberId && !join.leftAt) {
+      join.leftAt = Date.now();
+      saveState();
+      return join;
+    }
+  }
+  return null;
+}
+
+async function detectUsedInviteForMember(member) {
+  const guild = member.guild;
+  const tracking = ensureInviteTrackingState();
+  let current;
+  try {
+    current = await guild.invites.fetch();
+  } catch (error) {
+    console.warn('[INVITES] Could not fetch invites for join attribution:', error?.message || error);
+    return null;
+  }
+
+  let candidate = null;
+  let bestDelta = 0;
+  for (const invite of current.values()) {
+    const prev = inviteSnapshot.get(invite.code);
+    const nowUses = Number(invite.uses || 0);
+    const prevUses = Number(prev?.uses || 0);
+    const delta = nowUses - prevUses;
+    if (prev && delta > bestDelta) {
+      bestDelta = delta;
+      candidate = {
+        code: invite.code,
+        creatorId: invite.inviter?.id || prev.creatorId || tracking.invites?.[invite.code]?.creatorId || null,
+        creatorUsername: invite.inviter?.username || prev.creatorUsername || tracking.invites?.[invite.code]?.creatorUsername || null,
+        channelId: invite.channelId || invite.channel?.id || prev.channelId || null,
+      };
+    }
+  }
+
+  // One-use invites can disappear immediately after the successful join. If
+  // exactly one previously-active one-use code vanished, use it as the source.
+  if (!candidate) {
+    const vanishedOneUse = [];
+    for (const [code, prev] of inviteSnapshot.entries()) {
+      if (current.has(code)) continue;
+      if (Number(prev.maxUses || 0) === 1 && Number(prev.uses || 0) < 1) vanishedOneUse.push(prev);
+    }
+    if (vanishedOneUse.length === 1) candidate = vanishedOneUse[0];
+  }
+
+  const activeCodes = new Set();
+  inviteSnapshot.clear();
+  for (const invite of current.values()) {
+    activeCodes.add(invite.code);
+    rememberInvite(invite, true);
+    updateInviteSnapshotEntry(invite);
+  }
+  for (const [code, record] of Object.entries(tracking.invites)) {
+    if (record?.active && !activeCodes.has(code)) {
+      record.active = false;
+      record.deletedAt ||= Date.now();
+    }
+  }
+  tracking.lastSnapshotAt = Date.now();
+
+  let join = null;
+  if (candidate?.code) {
+    // If Discord omitted the inviter from the current payload, recover it from
+    // the persistent record captured when the link was created/snapshotted.
+    const saved = tracking.invites[candidate.code] || {};
+    candidate.creatorId ||= saved.creatorId || null;
+    candidate.creatorUsername ||= saved.creatorUsername || null;
+    candidate.channelId ||= saved.channelId || null;
+    join = recordInviteJoin(member, candidate);
+    console.log(`[INVITES] ${member.user?.tag || member.id} joined via ${candidate.code} created by ${candidate.creatorId || 'unknown creator'}`);
+  } else {
+    console.log(`[INVITES] Could not attribute ${member.user?.tag || member.id} to a tracked invite (vanity/unknown/older snapshot).`);
+  }
+  saveState();
+  return join;
+}
+
+function queueInviteJoinDetection(member) {
+  const run = () => detectUsedInviteForMember(member).catch(error => {
+    console.error('[INVITES] Join attribution failed:', error);
+    return null;
+  });
+  inviteDetectionQueue = inviteDetectionQueue.then(run, run);
+  return inviteDetectionQueue;
+}
+
+function inviteStatsFor(userId) {
+  const tracking = ensureInviteTrackingState();
+  const links = Object.values(tracking.invites).filter(inv => inv?.creatorId === userId);
+  const joins = tracking.joins.filter(j => j?.inviterId === userId);
+  const activeJoins = joins.filter(j => !j.leftAt);
+  return {
+    links,
+    activeLinks: links.filter(inv => inv.active),
+    joins,
+    activeJoins,
+    left: joins.length - activeJoins.length,
+  };
+}
+
+function latestInviteSourceFor(memberId) {
+  const tracking = ensureInviteTrackingState();
+  const sourceId = tracking.memberSources?.[memberId];
+  if (sourceId) {
+    const direct = tracking.joins.find(j => j?.id === sourceId);
+    if (direct) return direct;
+  }
+  for (let i = tracking.joins.length - 1; i >= 0; i--) {
+    if (tracking.joins[i]?.memberId === memberId) return tracking.joins[i];
+  }
+  return null;
+}
+
+function canInspectPrivateInviteData(interaction, targetId) {
+  if (interaction.user.id === targetId) return true;
+  if (interaction.guild?.ownerId === interaction.user.id) return true;
+  const perms = interaction.member?.permissions;
+  return Boolean(perms?.has(PermissionFlagsBits.Administrator) || perms?.has(PermissionFlagsBits.ManageGuild));
+}
+
+async function safeFetchUser(userId) {
+  if (!userId) return null;
+  return client.users.cache.get(userId) || await client.users.fetch(userId).catch(() => null);
+}
+
+function inviteUserLabel(user, fallbackId, fallbackUsername = null) {
+  if (user) return `**${escapeMassMentions(user.username)}** (\`${user.id}\`)`;
+  if (fallbackUsername) return `**${escapeMassMentions(fallbackUsername)}** (\`${fallbackId}\`)`;
+  return `\`${fallbackId || 'Unknown'}\``;
+}
+
+async function handleInvites(interaction) {
+  const target = interaction.options.getUser('user') || interaction.user;
+  const stats = inviteStatsFor(target.id);
+  const totalUses = stats.links.reduce((sum, inv) => sum + Number(inv.uses || 0), 0);
+  const trackingSince = state.inviteTracking?.initializedAt;
+  const description = [
+    `**Member**\n${inviteUserLabel(target, target.id)}`,
+    `**Invite Links Created**\n${stats.links.length}`,
+    `**Active Links**\n${stats.activeLinks.length}`,
+    `**Discord-reported Uses Across Saved Links**\n${totalUses}`,
+    `**Tracked Joins**\n${stats.joins.length}`,
+    `**Still in Server**\n${stats.activeJoins.length}`,
+    `**Left Server**\n${stats.left}`,
+    trackingSince ? `**Tracking Since**\n<t:${Math.floor(trackingSince / 1000)}:F>` : null,
+    '',
+    '-# Tracked joins only include members who joined after the invite tracker was initialized and whose invite could be identified.',
+  ].filter(v => v !== null).join('\n\n');
+  return interaction.reply(v2Payload({ title: 'Invite Stats', description }));
+}
+
+async function handleInviteLinks(interaction) {
+  const target = interaction.options.getUser('user') || interaction.user;
+  if (!canInspectPrivateInviteData(interaction, target.id)) {
+    return fail(interaction, 'Invite Links', 'You can only view your own invite links. Staff with Manage Server can inspect another member.');
+  }
+  await refreshInviteSnapshot(interaction.guild).catch(() => null);
+  const stats = inviteStatsFor(target.id);
+  if (!stats.links.length) {
+    return interaction.reply(v2Payload({ title: 'Invite Links', description: `${inviteUserLabel(target, target.id)} has no invite links saved by the tracker.` }));
+  }
+  const sorted = [...stats.links].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const lines = sorted.slice(0, 15).map((inv, index) => {
+    const status = inv.active ? 'Active' : 'Inactive';
+    const created = inv.createdAt ? `<t:${Math.floor(inv.createdAt / 1000)}:d>` : 'Unknown';
+    const expiry = inv.expiresAt ? ` • expires <t:${Math.floor(inv.expiresAt / 1000)}:R>` : '';
+    return `**${index + 1}. discord.gg/${inv.code}**\nUses: **${Number(inv.uses || 0)}** • ${status} • created ${created}${expiry}`;
+  });
+  if (sorted.length > 15) lines.push(`\n-# Showing 15 of ${sorted.length} saved links.`);
+  return interaction.reply(v2Payload({ title: `Invite Links - ${target.username}`, description: lines.join('\n\n') }));
+}
+
+async function handleInviteLeaderboard(interaction) {
+  const limit = interaction.options.getInteger('limit') || 10;
+  const tracking = ensureInviteTrackingState();
+  const totals = new Map();
+  for (const join of tracking.joins) {
+    if (!join?.inviterId) continue;
+    const row = totals.get(join.inviterId) || { total: 0, active: 0, username: join.inviterUsername || null };
+    row.total += 1;
+    if (!join.leftAt) row.active += 1;
+    row.username ||= join.inviterUsername || null;
+    totals.set(join.inviterId, row);
+  }
+  const ranking = [...totals.entries()].sort((a, b) => b[1].total - a[1].total || b[1].active - a[1].active).slice(0, limit);
+  if (!ranking.length) return interaction.reply(v2Payload({ title: 'Invite Leaderboard', description: 'No tracked invite joins yet.' }));
+  const lines = [];
+  for (let i = 0; i < ranking.length; i++) {
+    const [userId, row] = ranking[i];
+    const user = await safeFetchUser(userId);
+    lines.push(`**${i + 1}. ${user?.username || row.username || userId}**\nTracked joins: **${row.total}** • Still here: **${row.active}**`);
+  }
+  return interaction.reply(v2Payload({ title: 'Invite Leaderboard', description: `${lines.join('\n\n')}\n\n-# Rankings are based on joins detected by this bot after invite tracking started.` }));
+}
+
+async function handleInvitedBy(interaction) {
+  const member = interaction.options.getUser('member', true);
+  if (!canInspectPrivateInviteData(interaction, member.id)) {
+    return fail(interaction, 'Invited By', 'You can only check your own invite source. Staff with Manage Server can inspect another member.');
+  }
+  const source = latestInviteSourceFor(member.id);
+  if (!source) {
+    return interaction.reply(v2Payload({
+      title: 'Invited By',
+      description: `I do not have a tracked invite source for **${escapeMassMentions(member.username)}**.\n\nThey may have joined before tracking started, through a vanity/unknown invite, or during a period when Discord did not expose the changed invite use.`,
+      ephemeral: true,
+    }));
+  }
+  const inviter = await safeFetchUser(source.inviterId);
+  const description = [
+    `**Member**\n${inviteUserLabel(member, member.id)}`,
+    `**Invited By**\n${inviteUserLabel(inviter, source.inviterId, source.inviterUsername)}`,
+    `**Invite Code**\n\`${source.code || 'Unknown'}\``,
+    source.joinedAt ? `**Joined**\n<t:${Math.floor(source.joinedAt / 1000)}:F>` : null,
+    source.leftAt ? `**Later Left**\n<t:${Math.floor(source.leftAt / 1000)}:F>` : '**Current Status**\nStill in server',
+  ].filter(Boolean).join('\n\n');
+  return interaction.reply(v2Payload({ title: 'Invited By', description, ephemeral: true }));
+}
+
+async function handleInviteHistory(interaction) {
+  const target = interaction.options.getUser('user') || interaction.user;
+  if (!canInspectPrivateInviteData(interaction, target.id)) {
+    return fail(interaction, 'Invite History', 'You can only view your own invite history. Staff with Manage Server can inspect another member.');
+  }
+  const stats = inviteStatsFor(target.id);
+  if (!stats.joins.length) return interaction.reply(v2Payload({ title: 'Invite History', description: 'No tracked joins were found for this inviter.', ephemeral: true }));
+  const recent = [...stats.joins].sort((a, b) => Number(b.joinedAt || 0) - Number(a.joinedAt || 0)).slice(0, 20);
+  const lines = [];
+  for (let i = 0; i < recent.length; i++) {
+    const join = recent[i];
+    const user = await safeFetchUser(join.memberId);
+    const name = user?.username || join.memberUsername || join.memberId;
+    const status = join.leftAt ? `Left <t:${Math.floor(join.leftAt / 1000)}:R>` : 'Still in server';
+    const joined = join.joinedAt ? `<t:${Math.floor(join.joinedAt / 1000)}:R>` : 'Unknown';
+    lines.push(`**${i + 1}. ${escapeMassMentions(name)}** (\`${join.memberId}\`)\nvia \`${join.code || 'unknown'}\` • joined ${joined} • ${status}`);
+  }
+  if (stats.joins.length > 20) lines.push(`\n-# Showing the 20 most recent of ${stats.joins.length} tracked joins.`);
+  return interaction.reply(v2Payload({ title: `Invite History - ${target.username}`, description: lines.join('\n\n'), ephemeral: true }));
+}
+
+async function handleInviteRefresh(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.ManageGuild))) return;
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    const count = await refreshInviteSnapshot(interaction.guild);
+    return interaction.editReply(v2Edit({
+      title: 'Invite Tracker Refreshed',
+      description: `Rescanned **${count}** active invite link(s). Existing creator and join history was preserved.`,
+    }));
+  } catch (error) {
+    console.error('[INVITES] Manual refresh failed:', error);
+    return interaction.editReply(v2Edit({ title: 'Invite Refresh Failed', description: 'The bot could not fetch the server invite list. Make sure it has Manage Server / Administrator access.' }));
+  }
+}
 
 function startStatusRotator() {
   let index = 0;
@@ -945,11 +1376,39 @@ client.on('messageUpdate', async (_oldMessage, newMessage) => {
   await moderateMessage(newMessage).catch(error => console.error('[AUTOMOD] messageUpdate failed:', error));
 });
 
+client.on('inviteCreate', async invite => {
+  if (invite.guild?.id !== CONFIG.guildId) return;
+  try {
+    rememberInvite(invite, true);
+    updateInviteSnapshotEntry(invite);
+    saveState();
+  } catch (error) {
+    console.error('[INVITES] Failed to record inviteCreate:', error);
+  }
+});
+
+client.on('inviteDelete', invite => {
+  if (invite.guild?.id !== CONFIG.guildId) return;
+  try {
+    const code = String(invite.code || '');
+    const record = state.inviteTracking?.invites?.[code];
+    if (record) {
+      record.active = false;
+      record.deletedAt = Date.now();
+    }
+    inviteSnapshot.delete(code);
+    saveState();
+  } catch (error) {
+    console.error('[INVITES] Failed to record inviteDelete:', error);
+  }
+});
+
 client.on('guildMemberAdd', async member => {
   if (member.guild.id !== CONFIG.guildId || member.user.bot) return;
   try {
     registerMemberActivity('join', member.id);
     registerJoin(member);
+    await queueInviteJoinDetection(member);
     const assessment = evaluateAltRisk(member);
     if (assessment.score >= 25) await sendAltRiskLog(member, assessment, assessment.score >= CONFIG.altAlertThreshold);
 
@@ -970,6 +1429,7 @@ client.on('guildMemberRemove', member => {
   if (member.guild.id !== CONFIG.guildId || member.user?.bot) return;
   try {
     registerMemberActivity('leave', member.id);
+    markInviteJoinLeft(member.id);
   } catch (error) {
     console.error('[ANALYTICS] Failed to record member leave:', error);
   }
@@ -1063,6 +1523,7 @@ client.on('interactionCreate', async interaction => {
       case 'memberinfo': return handleMemberInfo(interaction);
       case 'serverinfo': return handleServerInfo(interaction);
       case 'serverstats': return handleServerStats(interaction);
+      case 'membercount': return handleMemberCount(interaction);
       case 'servergraph': return handleServerGraph(interaction);
       case 'channelinfo': return handleChannelInfo(interaction);
       case 'avatar': return handleAvatar(interaction);
@@ -1088,6 +1549,12 @@ client.on('interactionCreate', async interaction => {
       case 'emojicheck': return handleEmojiCheck(interaction);
       case 'scamalert': return handleScamAlertCommand(interaction);
       case 'evidence': return handleEvidenceCommand(interaction);
+      case 'invites': return handleInvites(interaction);
+      case 'invitelinks': return handleInviteLinks(interaction);
+      case 'inviteleaderboard': return handleInviteLeaderboard(interaction);
+      case 'invitedby': return handleInvitedBy(interaction);
+      case 'invitehistory': return handleInviteHistory(interaction);
+      case 'inviterefresh': return handleInviteRefresh(interaction);
       case 'dmpollcreate': return handleDmPollCreate(interaction);
       case 'dmquestion': return handleDmQuestion(interaction);
       case 'dmquestionremove': return handleDmQuestionRemove(interaction);
@@ -2709,6 +3176,26 @@ async function handleServerStats(interaction) {
       `**Warnings on Record**\n${warningCount.toLocaleString()}\n\n` +
       `**Censor Triggers**\n${(state.censoredTerms || []).length.toLocaleString()}\n\n` +
       `**Activity Tracking Started**\n<t:${Math.floor(trackingSince / 1000)}:F>`,
+  }));
+}
+
+async function handleMemberCount(interaction) {
+  const guild = interaction.guild;
+  const members = await guild.members.fetch().catch(() => guild.members.cache);
+  const humans = members.filter(m => !m.user.bot).size;
+  const bots = members.filter(m => m.user.bot).size;
+  const customerRole = guild.roles.cache.get(CONFIG.customerRoleId);
+  const customers = customerRole ? customerRole.members.filter(m => !m.user.bot).size : 0;
+  const stats24h = activityTotals(1);
+
+  return interaction.reply(v2Payload({
+    title: 'Member Count',
+    description:
+      `**Total Members**\n${guild.memberCount.toLocaleString()}\n\n` +
+      `**People**\n${humans.toLocaleString()}\n\n` +
+      `**Bots**\n${bots.toLocaleString()}\n\n` +
+      `**Customers**\n${customers.toLocaleString()}\n\n` +
+      `**Last 24 Hours**\n${stats24h.joins.toLocaleString()} joined - ${stats24h.leaves.toLocaleString()} left - Net ${formatSigned(stats24h.net)}`,
   }));
 }
 
@@ -5003,8 +5490,20 @@ async function refreshScamAlertProfiles(alert) {
   for (let i = 0; i < alert.relatedUsers.length; i++) {
     const old = alert.relatedUsers[i];
     const fresh = await buildScamRelatedUser(old.id, old.relation);
-    if (JSON.stringify(old) !== JSON.stringify(fresh)) changed = true;
-    alert.relatedUsers[i] = { ...old, ...fresh, relation: old.relation || fresh.relation || null };
+    // Never erase a previously resolved profile just because a later Discord fetch
+    // temporarily fails. Keep last-known values and only replace them with real data.
+    const merged = {
+      ...old,
+      id: fresh.id || old.id,
+      username: fresh.username || old.username || null,
+      fullUsername: fresh.fullUsername || old.fullUsername || old.username || null,
+      globalName: fresh.globalName || old.globalName || null,
+      avatarUrl: fresh.avatarUrl || old.avatarUrl || null,
+      createdAt: fresh.createdAt || old.createdAt || snowflakeCreatedAtMs(old.id) || null,
+      relation: old.relation || fresh.relation || null,
+    };
+    if (JSON.stringify(old) !== JSON.stringify(merged)) changed = true;
+    alert.relatedUsers[i] = merged;
   }
   if (alert.servers && extractUrls(alert.servers).some(isDiscordInviteUrl)) {
     const resolved = await resolveScamServerProfilesFromText(alert, alert.servers);
@@ -5058,11 +5557,18 @@ function formatScamRelatedUsers(alert) {
   const users = Array.isArray(alert.relatedUsers) ? alert.relatedUsers : [];
   if (!users.length) return 'No related Discord accounts have been added.';
   return users.map((user, index) => {
-    const username = user.fullUsername || user.username || 'Unknown username';
+    const resolvedUsername = user.fullUsername || user.username || null;
+    const heading = resolvedUsername ? escapeMassMentions(resolvedUsername) : `Discord User ${user.id}`;
+    const usernameLine = resolvedUsername
+      ? `**Username:** \`${escapeMassMentions(resolvedUsername)}\``
+      : '**Username:** `Unavailable / deleted account`';
     const display = user.globalName && user.globalName !== user.username ? `\n**Display Name:** ${escapeMassMentions(user.globalName)}` : '';
-    const created = user.createdAt ? `<t:${Math.floor(user.createdAt / 1000)}:F> (<t:${Math.floor(user.createdAt / 1000)}:R>)` : 'Unknown';
+    const accountLabel = user.username ? `@${escapeMassMentions(user.username)}` : 'Open Discord profile';
+    const profile = `\n**User:** [${accountLabel}](https://discord.com/users/${user.id})`;
+    const createdAt = user.createdAt || snowflakeCreatedAtMs(user.id);
+    const created = createdAt ? `<t:${Math.floor(createdAt / 1000)}:F> (<t:${Math.floor(createdAt / 1000)}:R>)` : 'Unavailable';
     const relation = user.relation ? `\n**Relation:** ${escapeMassMentions(user.relation)}` : '';
-    return `### ${index + 1}. ${escapeMassMentions(username)}\n**Username:** \`${escapeMassMentions(username)}\`${display}\n**User:** <@${user.id}>\n**User ID:** \`${user.id}\`\n**Account Created:** ${created}${relation}`;
+    return `### ${index + 1}. ${heading}\n${usernameLine}${display}${profile}\n**User ID:** \`${user.id}\`\n**Account Created:** ${created}${relation}`;
   }).join('\n\n');
 }
 
@@ -5071,7 +5577,7 @@ function formatScamServerProfiles(alert) {
   const sections = [];
   profiles.forEach((server, index) => {
     const owner = server.owner?.id
-      ? `${server.owner.fullUsername ? `\`${escapeMassMentions(server.owner.fullUsername)}\` - ` : ''}<@${server.owner.id}> (\`${server.owner.id}\`)`
+      ? `${server.owner.fullUsername ? `\`${escapeMassMentions(server.owner.fullUsername)}\` - ` : ''}[@${escapeMassMentions(server.owner.username || server.owner.fullUsername || 'owner')}](https://discord.com/users/${server.owner.id}) (\`${server.owner.id}\`)`
       : 'Not available from the invite. Use `/scamalert addserver` with `owner_id` to set it.';
     const created = server.createdAt ? `<t:${Math.floor(server.createdAt / 1000)}:F> (<t:${Math.floor(server.createdAt / 1000)}:R>)` : 'Unknown';
     const counts = [
@@ -5795,7 +6301,7 @@ function stripEphemeralFlag(payload) {
 
 function loadState() {
   const defaults = {
-    version: 11,
+    version: 12,
     nextBaptismAt: null,
     lockdown: { active: false, channels: {} },
     warnings: {},
@@ -5805,6 +6311,7 @@ function loadState() {
     recentBans: [],
     recentJoins: [],
     memberActivity: { trackingSince: Date.now(), events: [] },
+    inviteTracking: { initializedAt: null, lastSnapshotAt: null, invites: {}, joins: [], memberSources: {} },
     censorWarnCooldowns: {},
     dmPolls: {},
     pollResultsChannelId: null,
@@ -5851,6 +6358,7 @@ function loadState() {
             events: Array.isArray(parsed.memberActivity.events) ? parsed.memberActivity.events : [],
           }
         : defaults.memberActivity,
+      inviteTracking: normalizeInviteTrackingState(parsed.inviteTracking, defaults.inviteTracking),
       censorWarnCooldowns: parsed.censorWarnCooldowns && typeof parsed.censorWarnCooldowns === 'object' ? parsed.censorWarnCooldowns : {},
       dmPolls: parsed.dmPolls && typeof parsed.dmPolls === 'object' ? parsed.dmPolls : {},
       pollResultsChannelId: parsed.pollResultsChannelId || null,
@@ -5879,6 +6387,7 @@ function loadState() {
           memberActivity: parsed.memberActivity && typeof parsed.memberActivity === 'object'
             ? { trackingSince: parsed.memberActivity.trackingSince || Date.now(), events: Array.isArray(parsed.memberActivity.events) ? parsed.memberActivity.events : [] }
             : defaults.memberActivity,
+          inviteTracking: normalizeInviteTrackingState(parsed.inviteTracking, defaults.inviteTracking),
           censorWarnCooldowns: parsed.censorWarnCooldowns && typeof parsed.censorWarnCooldowns === 'object' ? parsed.censorWarnCooldowns : {},
           dmPolls: parsed.dmPolls && typeof parsed.dmPolls === 'object' ? parsed.dmPolls : {},
           pollResultsChannelId: parsed.pollResultsChannelId || null,

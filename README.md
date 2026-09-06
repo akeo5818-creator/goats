@@ -334,3 +334,33 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 - Related users display full username, display name, user ID, and account creation date.
 - Related server profiles display server name, server ID, creation date, owner when available/provided, approximate member/online counts, and description when Discord exposes it.
 - Existing saved Scam Alerts are refreshed on startup to migrate old evidence links and update account details.
+
+
+## v2.14 Scam Alert user profile fix
+- Related users no longer render as Discord's `@unknown-user` when they are outside the server.
+- Alerts show the fetched full username plus a direct Discord profile link instead of an unresolved raw mention.
+- Last-known usernames/display names/avatars are preserved if a later Discord API fetch temporarily fails.
+- Account creation timestamps continue to fall back to the Discord snowflake timestamp when needed.
+- Scam server owner references use the same safe profile-link format.
+
+
+## v2.15 Invite tracking
+
+- Automatically snapshots existing server invites on startup and listens for member-created invite links after that.
+- Tracks each invite code, creator, channel, creation time, current Discord use count, expiry/max-use settings, and active/deleted state.
+- On member join, compares invite-use counts to identify which invite was used and records the inviter + joined member.
+- On member leave, marks the tracked invite join as left so invite stats can show retained members separately.
+- `/invites [user]` shows invite totals, tracked joins, members still in server, and members who left.
+- `/invitelinks [user]` lists the actual active/saved invite links created by that user. Users can inspect their own links; Manage Server staff can inspect others.
+- `/inviteleaderboard [limit]` ranks inviters by tracked joins.
+- `/invitedby member:` shows the tracked invite source for yourself; Manage Server staff can inspect other members.
+- `/invitehistory [user]` shows recent members who joined through an inviter's links and whether they are still in the server.
+- `/inviterefresh` lets Manage Server staff force a fresh server invite snapshot.
+- Invite tracking is saved in the same persistent `state.json`, so keep the Railway `/data` volume mounted.
+- Historical joins from before v2.15 cannot be retroactively attributed unless they were already tracked elsewhere; tracking begins from the first v2.15 snapshot.
+
+
+## v2.16 Member count
+
+- Added `/membercount` for a quick V2 server population summary.
+- Shows total members, human members, bots, Customer-role members, and 24-hour join/leave/net activity.
