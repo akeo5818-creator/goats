@@ -304,7 +304,7 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 - FAQ is rebuilt only after emoji resolution, so its support-ticket button uses the resolved custom ticket emoji immediately after startup.
 
 
-## v2.11 Scam Alerts
+## v2.12 Scam Alerts
 
 - Uses Scam Alerts channel `1545949982467555389` by default (`SCAM_ALERTS_CHANNEL_ID` can override it).
 - Auto-creates a zero-permission `Scam alerts` notification role and keeps its role ID in persistent state.
@@ -316,3 +316,8 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 - Related users are stored with their Discord IDs and fetched usernames/global names when Discord can resolve them.
 - Alerts have persistent IDs like `SA-0001`, saved status, live message IDs, and survive Railway redeploys when `/data` is mounted.
 - Alert wording is intentionally presented as a **staff-submitted safety alert / reported activity** so evidence and context remain visible rather than treating unreviewed reports as automatically verified facts.
+
+
+## v2.12 Scam Alert multi-user update
+
+`/scamalert create` and `/scamalert adduser` accept multiple Discord IDs or mentions at once, separated by spaces, commas, or new lines. `/scamalert removeuser` can also remove multiple related accounts in one command. Up to 25 unique IDs are processed per command.

@@ -1,6 +1,6 @@
 {
   "name": "bloxy-moderation-bot",
-  "version": "2.11.0",
+  "version": "2.12.0",
   "private": true,
   "type": "module",
   "description": "Standalone Discord moderation, security, analytics, PvP tournaments, chat drops, DM polls, Customer-only FAQ and Scam Alerts with V2 components.",

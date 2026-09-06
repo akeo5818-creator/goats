@@ -660,15 +660,15 @@ const commands = [
       )))
     .addSubcommand(s => s
       .setName('adduser')
-      .setDescription('Add another related Discord user to an alert.')
+      .setDescription('Add one or more related Discord users to an alert.')
       .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20))
-      .addStringOption(o => o.setName('user_id').setDescription('Discord user ID or mention.').setRequired(true).setMinLength(17).setMaxLength(30))
-      .addStringOption(o => o.setName('relation').setDescription('How this account is related to the report.').setMaxLength(300)))
+      .addStringOption(o => o.setName('users').setDescription('Discord user IDs/mentions. Separate with spaces, commas, or new lines.').setRequired(true).setMinLength(17).setMaxLength(1000))
+      .addStringOption(o => o.setName('relation').setDescription('Optional relation applied to all users added in this command.').setMaxLength(300)))
     .addSubcommand(s => s
       .setName('removeuser')
-      .setDescription('Remove a related Discord user from an alert.')
+      .setDescription('Remove one or more related Discord users from an alert.')
       .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20))
-      .addStringOption(o => o.setName('user_id').setDescription('Discord user ID or mention.').setRequired(true).setMinLength(17).setMaxLength(30)))
+      .addStringOption(o => o.setName('users').setDescription('Discord user IDs/mentions to remove. Separate with spaces, commas, or new lines.').setRequired(true).setMinLength(17).setMaxLength(1000)))
     .addSubcommand(s => s
       .setName('view')
       .setDescription('View a saved Scam Alert privately.')
@@ -4955,33 +4955,65 @@ async function handleScamAlertCommand(interaction) {
   if (sub === 'adduser') {
     const alert = getScamAlert(interaction.options.getString('id', true));
     if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
-    const ids = parseScamUserIds(interaction.options.getString('user_id', true));
-    if (!ids.length) return fail(interaction, 'Invalid User ID', 'Provide a valid Discord user ID or mention.');
-    const userId = ids[0];
-    if ((alert.relatedUsers || []).some(user => user.id === userId)) return fail(interaction, 'Already Added', 'That Discord account is already listed on this alert.');
+    const ids = parseScamUserIds(interaction.options.getString('users', true));
+    if (!ids.length) return fail(interaction, 'No Valid User IDs', 'Provide at least one valid Discord user ID or mention.');
+
     const relation = interaction.options.getString('relation')?.trim() || null;
     alert.relatedUsers ||= [];
-    alert.relatedUsers.push(await buildScamRelatedUser(userId, relation));
+    const existingIds = new Set(alert.relatedUsers.map(user => user.id));
+    const toAdd = ids.filter(userId => !existingIds.has(userId));
+    const skipped = ids.filter(userId => existingIds.has(userId));
+
+    if (!toAdd.length) {
+      return fail(interaction, 'Already Added', `All ${ids.length} provided account(s) are already listed on **${alert.id}**.`);
+    }
+
+    const builtUsers = await Promise.all(toAdd.map(userId => buildScamRelatedUser(userId, relation)));
+    alert.relatedUsers.push(...builtUsers);
     alert.updatedAt = Date.now();
+    alert.updatedBy = interaction.user.id;
     saveState();
     const message = await refreshScamAlertMessage(alert);
-    return interaction.reply(v2Payload({ title: 'Related User Added', description: `<@${userId}> (\`${userId}\`) was added to **${alert.id}**.\n\n[Open alert](${message.url})`, ephemeral: true }));
+
+    const addedLines = toAdd.map(userId => `<@${userId}> (\`${userId}\`)`).join('\n');
+    const skippedText = skipped.length ? `\n\n**Already listed / skipped:** ${skipped.length}` : '';
+    return interaction.reply(v2Payload({
+      title: `${toAdd.length} Related User${toAdd.length === 1 ? '' : 's'} Added`,
+      description: `${addedLines}\n\nAdded to **${alert.id}**.${skippedText}\n\n**Total related users:** ${alert.relatedUsers.length}\n[Open alert](${message.url})`,
+      ephemeral: true,
+    }));
   }
 
   if (sub === 'removeuser') {
     const alert = getScamAlert(interaction.options.getString('id', true));
     if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
-    const ids = parseScamUserIds(interaction.options.getString('user_id', true));
-    if (!ids.length) return fail(interaction, 'Invalid User ID', 'Provide a valid Discord user ID or mention.');
-    const userId = ids[0];
+    const ids = parseScamUserIds(interaction.options.getString('users', true));
+    if (!ids.length) return fail(interaction, 'No Valid User IDs', 'Provide at least one valid Discord user ID or mention.');
+
     const existingUsers = alert.relatedUsers || [];
-    if (!existingUsers.some(user => user.id === userId)) return fail(interaction, 'User Not Listed', 'That Discord account is not on this alert.');
-    if (existingUsers.length <= 1) return fail(interaction, 'Cannot Remove Last User', 'Every Scam Alert must keep at least one related Discord account. Add another account before removing this one.');
-    alert.relatedUsers = existingUsers.filter(user => user.id !== userId);
+    const existingIds = new Set(existingUsers.map(user => user.id));
+    const removable = ids.filter(userId => existingIds.has(userId));
+    const notListed = ids.filter(userId => !existingIds.has(userId));
+
+    if (!removable.length) return fail(interaction, 'Users Not Listed', 'None of the provided Discord accounts are listed on this alert.');
+    if (existingUsers.length - removable.length < 1) {
+      return fail(interaction, 'Cannot Remove Last User', 'Every Scam Alert must keep at least one related Discord account. Remove fewer accounts or add another account first.');
+    }
+
+    const removeSet = new Set(removable);
+    alert.relatedUsers = existingUsers.filter(user => !removeSet.has(user.id));
     alert.updatedAt = Date.now();
+    alert.updatedBy = interaction.user.id;
     saveState();
     const message = await refreshScamAlertMessage(alert);
-    return interaction.reply(v2Payload({ title: 'Related User Removed', description: `\`${userId}\` was removed from **${alert.id}**.\n\n[Open alert](${message.url})`, ephemeral: true }));
+
+    const removedLines = removable.map(userId => `\`${userId}\``).join('\n');
+    const skippedText = notListed.length ? `\n\n**Not listed / skipped:** ${notListed.length}` : '';
+    return interaction.reply(v2Payload({
+      title: `${removable.length} Related User${removable.length === 1 ? '' : 's'} Removed`,
+      description: `${removedLines}\n\nRemoved from **${alert.id}**.${skippedText}\n\n**Total related users:** ${alert.relatedUsers.length}\n[Open alert](${message.url})`,
+      ephemeral: true,
+    }));
   }
 
   if (sub === 'view') {
