@@ -302,3 +302,17 @@ All bot V2 containers intentionally have **no accent color**, so Discord does no
 - Text displays build their custom-emoji markup from the fetched emoji metadata too.
 - `/emojicheck` shows whether the bot can actually access each configured emoji and which connected server owns it.
 - FAQ is rebuilt only after emoji resolution, so its support-ticket button uses the resolved custom ticket emoji immediately after startup.
+
+
+## v2.11 Scam Alerts
+
+- Uses Scam Alerts channel `1545949982467555389` by default (`SCAM_ALERTS_CHANNEL_ID` can override it).
+- Auto-creates a zero-permission `Scam alerts` notification role and keeps its role ID in persistent state.
+- Every public alert is a Components V2 panel using `<:alert:1544197209761779742>`.
+- The **Get notified** button toggles the `Scam alerts` role for the member.
+- New/reposted alerts ghost-ping the notification role so subscribers are actually notified.
+- `/scamalert create` supports multiple related Discord IDs/mentions, reported activity, servers/communities, evidence/references, and staff notes.
+- `/scamalert edit`, `/scamalert adduser`, `/scamalert removeuser`, `/scamalert view`, `/scamalert list`, `/scamalert repost`, `/scamalert delete`, and `/scamalert setup` are included.
+- Related users are stored with their Discord IDs and fetched usernames/global names when Discord can resolve them.
+- Alerts have persistent IDs like `SA-0001`, saved status, live message IDs, and survive Railway redeploys when `/data` is mounted.
+- Alert wording is intentionally presented as a **staff-submitted safety alert / reported activity** so evidence and context remain visible rather than treating unreviewed reports as automatically verified facts.

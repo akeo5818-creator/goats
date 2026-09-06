@@ -53,6 +53,7 @@ const CONFIG = {
   baptismChannelId: process.env.BAPTISM_CHANNEL_ID || '1537689865267974193',
   modLogChannelId: process.env.MOD_LOG_CHANNEL_ID || '1537728472997306389',
   dmLogChannelId: process.env.DM_LOG_CHANNEL_ID || '1541705487052046408',
+  scamAlertsChannelId: process.env.SCAM_ALERTS_CHANNEL_ID || '1545949982467555389',
   pollResultsChannelId: process.env.POLL_RESULTS_CHANNEL_ID || null,
   adminAlertRoleId: process.env.ADMIN_ALERT_ROLE_ID || null,
   altAlertThreshold: clampNumber(Number(process.env.ALT_ALERT_THRESHOLD || 40), 20, 100, 40),
@@ -70,6 +71,7 @@ const TOURNAMENT_CHANNEL_NAME = 'pvp-tournaments';
 const FAQ_CHANNEL_NAME = 'faq';
 const CHAMPION_ROLE_NAME = 'Champion';
 const LINK_BYPASS_ROLE_NAME = 'Link Bypass';
+const SCAM_ALERTS_ROLE_NAME = 'Scam alerts';
 const TOURNAMENT_REGISTRATION_MINUTES = 10;
 const TOURNAMENT_TROPHY_ID = '1545550040628461588';
 const TOURNAMENT_TROPHY_NAME = 'Trophy_fixed';
@@ -77,6 +79,8 @@ const GIVEAWAY_EMOJI_ID = '1540636417577721927';
 const GIVEAWAY_EMOJI_NAME = 'giveaway';
 const TICKET_EMOJI_ID = '1540639436436406332';
 const TICKET_EMOJI_NAME = 'ticket';
+const SCAM_ALERT_EMOJI_ID = '1544197209761779742';
+const SCAM_ALERT_EMOJI_NAME = 'alert';
 
 // Do not rely on hard-coded emoji markup/component objects alone. Discord can
 // silently fall back / fail to render a custom component emoji when the bot has
@@ -86,6 +90,7 @@ const CUSTOM_EMOJI_SPECS = {
   trophy: { id: TOURNAMENT_TROPHY_ID, name: TOURNAMENT_TROPHY_NAME, animated: true },
   giveaway: { id: GIVEAWAY_EMOJI_ID, name: GIVEAWAY_EMOJI_NAME, animated: false },
   ticket: { id: TICKET_EMOJI_ID, name: TICKET_EMOJI_NAME, animated: false },
+  alert: { id: SCAM_ALERT_EMOJI_ID, name: SCAM_ALERT_EMOJI_NAME, animated: false },
 };
 const resolvedCustomEmojis = new Map();
 
@@ -625,6 +630,63 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
+    .setName('scamalert')
+    .setDescription('Create and manage staff-posted scam alerts.')
+    .addSubcommand(s => s
+      .setName('setup')
+      .setDescription('Verify the Scam Alerts channel and notification role.'))
+    .addSubcommand(s => s
+      .setName('create')
+      .setDescription('Post a new Scam Alert.')
+      .addStringOption(o => o.setName('title').setDescription('Short alert title or scam name.').setRequired(true).setMinLength(2).setMaxLength(100))
+      .addStringOption(o => o.setName('users').setDescription('Related Discord user IDs or mentions, separated by spaces/commas.').setRequired(true).setMinLength(17).setMaxLength(1000))
+      .addStringOption(o => o.setName('what_they_do').setDescription('What the reported users are doing.').setRequired(true).setMinLength(3).setMaxLength(1500))
+      .addStringOption(o => o.setName('servers').setDescription('Servers/communities reportedly run or used by them.').setMaxLength(1200))
+      .addStringOption(o => o.setName('evidence').setDescription('Evidence links, references, or proof notes.').setMaxLength(1500))
+      .addStringOption(o => o.setName('notes').setDescription('Any additional staff notes.').setMaxLength(1000)))
+    .addSubcommand(s => s
+      .setName('edit')
+      .setDescription('Edit an existing Scam Alert and update its live V2 message.')
+      .addStringOption(o => o.setName('id').setDescription('Alert ID, e.g. SA-0001.').setRequired(true).setMaxLength(20))
+      .addStringOption(o => o.setName('title').setDescription('New title.').setMinLength(2).setMaxLength(100))
+      .addStringOption(o => o.setName('what_they_do').setDescription('Updated reported activity.').setMinLength(3).setMaxLength(1500))
+      .addStringOption(o => o.setName('servers').setDescription('Updated servers/communities. Use NONE to clear.').setMaxLength(1200))
+      .addStringOption(o => o.setName('evidence').setDescription('Updated evidence/references. Use NONE to clear.').setMaxLength(1500))
+      .addStringOption(o => o.setName('notes').setDescription('Updated notes. Use NONE to clear.').setMaxLength(1000))
+      .addStringOption(o => o.setName('status').setDescription('Alert status.').addChoices(
+        { name: 'Active', value: 'active' },
+        { name: 'Resolved', value: 'resolved' },
+        { name: 'Archived', value: 'archived' }
+      )))
+    .addSubcommand(s => s
+      .setName('adduser')
+      .setDescription('Add another related Discord user to an alert.')
+      .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20))
+      .addStringOption(o => o.setName('user_id').setDescription('Discord user ID or mention.').setRequired(true).setMinLength(17).setMaxLength(30))
+      .addStringOption(o => o.setName('relation').setDescription('How this account is related to the report.').setMaxLength(300)))
+    .addSubcommand(s => s
+      .setName('removeuser')
+      .setDescription('Remove a related Discord user from an alert.')
+      .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20))
+      .addStringOption(o => o.setName('user_id').setDescription('Discord user ID or mention.').setRequired(true).setMinLength(17).setMaxLength(30)))
+    .addSubcommand(s => s
+      .setName('view')
+      .setDescription('View a saved Scam Alert privately.')
+      .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20)))
+    .addSubcommand(s => s
+      .setName('list')
+      .setDescription('List saved Scam Alerts.'))
+    .addSubcommand(s => s
+      .setName('repost')
+      .setDescription('Repost an alert in the Scam Alerts channel and notify subscribers again.')
+      .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20)))
+    .addSubcommand(s => s
+      .setName('delete')
+      .setDescription('Delete an alert message and its saved record.')
+      .addStringOption(o => o.setName('id').setDescription('Alert ID.').setRequired(true).setMaxLength(20)))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('dmall')
     .setDescription('DM a plain-text announcement to all members or one role.')
     .addStringOption(o => o.setName('message').setDescription('Plain-text message to send.').setRequired(true).setMinLength(1).setMaxLength(2000))
@@ -670,6 +732,14 @@ client.once('ready', async () => {
     console.log(`[DM POLL] Private results channel ready: #${pollChannel.name} (${pollChannel.id})`);
   } catch (error) {
     console.error('[DM POLL] Could not prepare the private results channel:', error);
+  }
+
+  try {
+    const guild = await client.guilds.fetch(CONFIG.guildId);
+    const scamSetup = await ensureScamAlertsInfrastructure(guild);
+    console.log(`[SCAM ALERTS] Ready: #${scamSetup.channel.name} | ${scamSetup.role.name} (${scamSetup.role.id})`);
+  } catch (error) {
+    console.error('[SCAM ALERTS] Auto-setup failed:', error);
   }
 
   try {
@@ -879,12 +949,29 @@ client.on('guildBanRemove', async ban => {
   }
 });
 
+client.on('roleDelete', role => {
+  if (role.guild.id !== CONFIG.guildId) return;
+  if (role.id !== state.scamAlerts?.roleId) return;
+  state.scamAlerts.roleId = null;
+  saveState();
+  setTimeout(async () => {
+    try {
+      const guild = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId);
+      await ensureScamAlertsRole(guild);
+      console.log('[SCAM ALERTS] Recreated deleted Scam alerts role.');
+    } catch (error) {
+      console.error('[SCAM ALERTS] Failed to recreate deleted notification role:', error);
+    }
+  }, 1500).unref?.();
+});
+
 client.on('interactionCreate', async interaction => {
   try {
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('dmpoll:')) return handleDmPollButton(interaction);
       if (interaction.customId.startsWith('tour:')) return handleTournamentButton(interaction);
       if (interaction.customId.startsWith('chatdrop:')) return handleChatDropButton(interaction);
+      if (interaction.customId.startsWith('scamalert:')) return handleScamAlertButton(interaction);
       return;
     }
     if (interaction.isStringSelectMenu()) {
@@ -951,6 +1038,7 @@ client.on('interactionCreate', async interaction => {
       case 'faqlist': return handleFaqList(interaction);
       case 'faqrefresh': return handleFaqRefresh(interaction);
       case 'emojicheck': return handleEmojiCheck(interaction);
+      case 'scamalert': return handleScamAlertCommand(interaction);
       case 'dmpollcreate': return handleDmPollCreate(interaction);
       case 'dmquestion': return handleDmQuestion(interaction);
       case 'dmquestionremove': return handleDmQuestionRemove(interaction);
@@ -4639,6 +4727,308 @@ async function ensureFaqChannel(guild) {
   return channel;
 }
 
+
+function normalizeScamAlertsState(raw, defaults) {
+  const value = raw && typeof raw === 'object' ? raw : {};
+  const alerts = value.alerts && typeof value.alerts === 'object' ? value.alerts : {};
+  const order = Array.isArray(value.order) ? value.order.filter(id => alerts[id]) : Object.keys(alerts);
+  const highest = order.reduce((max, id) => {
+    const m = String(id).match(/^SA-(\d+)$/i);
+    return m ? Math.max(max, Number(m[1])) : max;
+  }, 0);
+  return {
+    ...defaults,
+    ...value,
+    channelId: CONFIG.scamAlertsChannelId,
+    roleId: value.roleId || null,
+    nextNumber: Math.max(Number(value.nextNumber) || 1, highest + 1),
+    alerts,
+    order,
+  };
+}
+
+async function ensureScamAlertsRole(guild) {
+  state.scamAlerts ||= normalizeScamAlertsState(null, { channelId: CONFIG.scamAlertsChannelId, roleId: null, nextNumber: 1, alerts: {}, order: [] });
+  let role = state.scamAlerts.roleId ? guild.roles.cache.get(state.scamAlerts.roleId) : null;
+  if (!role && state.scamAlerts.roleId) role = await guild.roles.fetch(state.scamAlerts.roleId).catch(() => null);
+  if (!role) role = guild.roles.cache.find(r => r.name.toLowerCase() === SCAM_ALERTS_ROLE_NAME.toLowerCase()) || null;
+  if (!role) {
+    role = await guild.roles.create({
+      name: SCAM_ALERTS_ROLE_NAME,
+      permissions: [],
+      mentionable: false,
+      reason: 'Notification-only role for Scam Alerts',
+    });
+  }
+  state.scamAlerts.roleId = role.id;
+  saveState();
+  return role;
+}
+
+async function ensureScamAlertsInfrastructure(guild) {
+  const role = await ensureScamAlertsRole(guild);
+  const channel = await guild.channels.fetch(CONFIG.scamAlertsChannelId).catch(() => null);
+  if (!channel?.isTextBased()) throw new Error(`Scam Alerts channel ${CONFIG.scamAlertsChannelId} could not be found or is not text-based.`);
+  state.scamAlerts.channelId = channel.id;
+  saveState();
+  return { role, channel };
+}
+
+function parseScamUserIds(input) {
+  const ids = [...String(input || '').matchAll(/\d{17,20}/g)].map(match => match[0]);
+  return [...new Set(ids)].slice(0, 25);
+}
+
+async function buildScamRelatedUser(userId, relation = null) {
+  const user = await client.users.fetch(userId).catch(() => null);
+  return {
+    id: userId,
+    username: user?.username || null,
+    globalName: user?.globalName || null,
+    relation: relation ? String(relation).trim() : null,
+  };
+}
+
+function getScamAlert(id) {
+  const key = String(id || '').trim().toUpperCase();
+  return state.scamAlerts?.alerts?.[key] || null;
+}
+
+function scamAlertMessageUrl(alert) {
+  if (!alert?.messageId) return null;
+  return `https://discord.com/channels/${CONFIG.guildId}/${CONFIG.scamAlertsChannelId}/${alert.messageId}`;
+}
+
+function formatScamRelatedUsers(alert) {
+  const users = Array.isArray(alert.relatedUsers) ? alert.relatedUsers : [];
+  if (!users.length) return 'No related Discord accounts have been added.';
+  return users.map((user, index) => {
+    const name = user.globalName || user.username;
+    const label = name ? `**${index + 1}. ${escapeMassMentions(name)}**` : `**${index + 1}. Discord Account**`;
+    const relation = user.relation ? ` - ${escapeMassMentions(user.relation)}` : '';
+    return `${label}\n<@${user.id}> - ID: \`${user.id}\`${relation}`;
+  }).join('\n\n');
+}
+
+function makeScamAlertPayload(alert) {
+  const alertEmoji = customEmojiText('alert');
+  const statusLabel = ({ active: 'ACTIVE', resolved: 'RESOLVED', archived: 'ARCHIVED' })[alert.status] || String(alert.status || 'ACTIVE').toUpperCase();
+  const container = new ContainerBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`# ${alertEmoji} Scam Alert - ${escapeMassMentions(alert.title)}\n**Alert ID:** \`${alert.id}\`\n**Status:** ${statusLabel}\n**Posted:** <t:${Math.floor(alert.createdAt / 1000)}:F>`),
+    new TextDisplayBuilder().setContent(`## Related Users\n${formatScamRelatedUsers(alert)}`),
+    new TextDisplayBuilder().setContent(`## What they do\n${escapeMassMentions(alert.activity || 'Not provided.')}`),
+  );
+
+  if (alert.servers) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Servers / Communities\n${escapeMassMentions(alert.servers)}`));
+  if (alert.evidence) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Evidence / References\n${escapeMassMentions(alert.evidence)}`));
+  if (alert.notes) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Additional Notes\n${escapeMassMentions(alert.notes)}`));
+  container.addTextDisplayComponents(new TextDisplayBuilder().setContent('-# This is a staff-submitted safety alert. Review the listed evidence and context before taking action.'));
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('scamalert:toggle')
+      .setLabel('Get notified')
+      .setEmoji(customEmojiComponent('alert'))
+      .setStyle(ButtonStyle.Secondary)
+  );
+  return { components: [container, row], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+}
+
+async function ghostPingScamAlertsRole(channel, role) {
+  const ping = await channel.send({
+    content: `<@&${role.id}>`,
+    allowedMentions: { roles: [role.id] },
+  }).catch(() => null);
+  if (ping) setTimeout(() => ping.delete().catch(() => {}), 1200).unref?.();
+}
+
+async function postScamAlert(alert, { notify = true, replaceOld = false } = {}) {
+  const guild = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId);
+  const { channel, role } = await ensureScamAlertsInfrastructure(guild);
+  if (replaceOld && alert.messageId) {
+    const old = await channel.messages.fetch(alert.messageId).catch(() => null);
+    if (old) await old.delete().catch(() => {});
+    alert.messageId = null;
+  }
+  if (notify) await ghostPingScamAlertsRole(channel, role);
+  const message = await channel.send(makeScamAlertPayload(alert));
+  alert.messageId = message.id;
+  alert.updatedAt = Date.now();
+  saveState();
+  return message;
+}
+
+async function refreshScamAlertMessage(alert) {
+  const guild = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId);
+  const { channel } = await ensureScamAlertsInfrastructure(guild);
+  let message = alert.messageId ? await channel.messages.fetch(alert.messageId).catch(() => null) : null;
+  if (!message) return postScamAlert(alert, { notify: false });
+  await message.edit(makeScamAlertPayload(alert));
+  alert.updatedAt = Date.now();
+  saveState();
+  return message;
+}
+
+async function handleScamAlertButton(interaction) {
+  if (interaction.guildId !== CONFIG.guildId) return;
+  const [, action] = interaction.customId.split(':');
+  if (action !== 'toggle') return;
+  const guild = interaction.guild || await client.guilds.fetch(CONFIG.guildId);
+  const role = await ensureScamAlertsRole(guild);
+  const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!member) return interaction.reply(v2Payload({ title: 'Could Not Update Role', description: 'Your server member profile could not be loaded.', ephemeral: true }));
+
+  if (member.roles.cache.has(role.id)) {
+    await member.roles.remove(role, 'Scam Alerts notification opt-out');
+    return interaction.reply(v2Payload({ title: 'Scam Alerts Disabled', description: `${customEmojiText('alert')} You will no longer be pinged when a new Scam Alert is posted.`, ephemeral: true }));
+  }
+
+  await member.roles.add(role, 'Scam Alerts notification opt-in');
+  return interaction.reply(v2Payload({ title: 'Scam Alerts Enabled', description: `${customEmojiText('alert')} You now have the **${SCAM_ALERTS_ROLE_NAME}** role and will be notified when a new alert is posted.`, ephemeral: true }));
+}
+
+async function handleScamAlertCommand(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
+  state.scamAlerts = normalizeScamAlertsState(state.scamAlerts, { channelId: CONFIG.scamAlertsChannelId, roleId: null, nextNumber: 1, alerts: {}, order: [] });
+  const sub = interaction.options.getSubcommand();
+
+  if (sub === 'setup') {
+    const { channel, role } = await ensureScamAlertsInfrastructure(interaction.guild);
+    return interaction.reply(v2Payload({
+      title: `${customEmojiText('alert')} Scam Alerts Ready`,
+      description: `**Channel:** ${channel}\n**Channel ID:** \`${channel.id}\`\n**Notification role:** ${role}\n**Role ID:** \`${role.id}\`\n\nThe role has no permissions and is only used for alert notifications.`,
+      ephemeral: true,
+    }));
+  }
+
+  if (sub === 'create') {
+    const ids = parseScamUserIds(interaction.options.getString('users', true));
+    if (!ids.length) return fail(interaction, 'No Valid User IDs', 'Provide at least one Discord user ID or mention.');
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const relatedUsers = await Promise.all(ids.map(id => buildScamRelatedUser(id)));
+    const number = state.scamAlerts.nextNumber++;
+    const id = `SA-${String(number).padStart(4, '0')}`;
+    const alert = {
+      id,
+      title: interaction.options.getString('title', true).trim(),
+      activity: interaction.options.getString('what_they_do', true).trim(),
+      servers: interaction.options.getString('servers')?.trim() || null,
+      evidence: interaction.options.getString('evidence')?.trim() || null,
+      notes: interaction.options.getString('notes')?.trim() || null,
+      relatedUsers,
+      status: 'active',
+      createdAt: Date.now(),
+      createdBy: interaction.user.id,
+      updatedAt: Date.now(),
+      messageId: null,
+    };
+    state.scamAlerts.alerts[id] = alert;
+    state.scamAlerts.order.unshift(id);
+    saveState();
+    const message = await postScamAlert(alert, { notify: true });
+    await logAction({ title: 'Scam Alert Created', description: `${customEmojiText('alert')} A new staff safety alert was posted.`, moderator: interaction.user, reason: alert.title, extra: `Alert ID: \`${alert.id}\`\nChannel: <#${CONFIG.scamAlertsChannelId}>\nRelated users: ${relatedUsers.length}` }).catch(() => {});
+    return interaction.editReply(v2Edit({ title: 'Scam Alert Posted', description: `${customEmojiText('alert')} **${alert.id}** was posted in <#${CONFIG.scamAlertsChannelId}>.\n\n[Open alert](${message.url})` }));
+  }
+
+  if (sub === 'edit') {
+    const alert = getScamAlert(interaction.options.getString('id', true));
+    if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
+    const fields = [
+      ['title', 'title'], ['activity', 'what_they_do'], ['servers', 'servers'], ['evidence', 'evidence'], ['notes', 'notes'], ['status', 'status'],
+    ];
+    let changed = false;
+    for (const [key, option] of fields) {
+      const value = interaction.options.getString(option);
+      if (value == null) continue;
+      changed = true;
+      if (['servers', 'evidence', 'notes'].includes(key) && value.trim().toUpperCase() === 'NONE') alert[key] = null;
+      else alert[key] = value.trim();
+    }
+    if (!changed) return fail(interaction, 'Nothing To Change', 'Provide at least one field to update.');
+    alert.updatedAt = Date.now();
+    alert.updatedBy = interaction.user.id;
+    saveState();
+    const message = await refreshScamAlertMessage(alert);
+    return interaction.reply(v2Payload({ title: 'Scam Alert Updated', description: `${customEmojiText('alert')} **${alert.id}** has been updated.\n\n[Open alert](${message.url})`, ephemeral: true }));
+  }
+
+  if (sub === 'adduser') {
+    const alert = getScamAlert(interaction.options.getString('id', true));
+    if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
+    const ids = parseScamUserIds(interaction.options.getString('user_id', true));
+    if (!ids.length) return fail(interaction, 'Invalid User ID', 'Provide a valid Discord user ID or mention.');
+    const userId = ids[0];
+    if ((alert.relatedUsers || []).some(user => user.id === userId)) return fail(interaction, 'Already Added', 'That Discord account is already listed on this alert.');
+    const relation = interaction.options.getString('relation')?.trim() || null;
+    alert.relatedUsers ||= [];
+    alert.relatedUsers.push(await buildScamRelatedUser(userId, relation));
+    alert.updatedAt = Date.now();
+    saveState();
+    const message = await refreshScamAlertMessage(alert);
+    return interaction.reply(v2Payload({ title: 'Related User Added', description: `<@${userId}> (\`${userId}\`) was added to **${alert.id}**.\n\n[Open alert](${message.url})`, ephemeral: true }));
+  }
+
+  if (sub === 'removeuser') {
+    const alert = getScamAlert(interaction.options.getString('id', true));
+    if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
+    const ids = parseScamUserIds(interaction.options.getString('user_id', true));
+    if (!ids.length) return fail(interaction, 'Invalid User ID', 'Provide a valid Discord user ID or mention.');
+    const userId = ids[0];
+    const existingUsers = alert.relatedUsers || [];
+    if (!existingUsers.some(user => user.id === userId)) return fail(interaction, 'User Not Listed', 'That Discord account is not on this alert.');
+    if (existingUsers.length <= 1) return fail(interaction, 'Cannot Remove Last User', 'Every Scam Alert must keep at least one related Discord account. Add another account before removing this one.');
+    alert.relatedUsers = existingUsers.filter(user => user.id !== userId);
+    alert.updatedAt = Date.now();
+    saveState();
+    const message = await refreshScamAlertMessage(alert);
+    return interaction.reply(v2Payload({ title: 'Related User Removed', description: `\`${userId}\` was removed from **${alert.id}**.\n\n[Open alert](${message.url})`, ephemeral: true }));
+  }
+
+  if (sub === 'view') {
+    const alert = getScamAlert(interaction.options.getString('id', true));
+    if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
+    const url = scamAlertMessageUrl(alert);
+    return interaction.reply(v2Payload({
+      title: `${customEmojiText('alert')} ${alert.id} - ${alert.title}`,
+      description: `**Status:** ${String(alert.status).toUpperCase()}\n**Related users:** ${(alert.relatedUsers || []).length}\n**What they do:** ${truncate(alert.activity, 1200)}\n**Servers / communities:** ${truncate(alert.servers || 'Not provided.', 600)}\n**Evidence:** ${truncate(alert.evidence || 'Not provided.', 800)}${url ? `\n\n[Open live alert](${url})` : ''}`,
+      ephemeral: true,
+    }));
+  }
+
+  if (sub === 'list') {
+    const ids = (state.scamAlerts.order || []).filter(id => state.scamAlerts.alerts[id]).slice(0, 25);
+    const text = ids.length ? ids.map(id => {
+      const alert = state.scamAlerts.alerts[id];
+      return `**${alert.id}** - ${escapeMassMentions(alert.title)} - ${String(alert.status || 'active').toUpperCase()} - ${(alert.relatedUsers || []).length} user(s)`;
+    }).join('\n') : 'No Scam Alerts have been saved yet.';
+    return interaction.reply(v2Payload({ title: `${customEmojiText('alert')} Saved Scam Alerts`, description: text, ephemeral: true }));
+  }
+
+  if (sub === 'repost') {
+    const alert = getScamAlert(interaction.options.getString('id', true));
+    if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const message = await postScamAlert(alert, { notify: true, replaceOld: true });
+    return interaction.editReply(v2Edit({ title: 'Scam Alert Reposted', description: `${customEmojiText('alert')} **${alert.id}** was reposted and subscribers were notified again.\n\n[Open alert](${message.url})` }));
+  }
+
+  if (sub === 'delete') {
+    const id = String(interaction.options.getString('id', true)).trim().toUpperCase();
+    const alert = getScamAlert(id);
+    if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
+    const channel = await interaction.guild.channels.fetch(CONFIG.scamAlertsChannelId).catch(() => null);
+    if (channel?.isTextBased() && alert.messageId) {
+      const message = await channel.messages.fetch(alert.messageId).catch(() => null);
+      if (message) await message.delete().catch(() => {});
+    }
+    delete state.scamAlerts.alerts[id];
+    state.scamAlerts.order = (state.scamAlerts.order || []).filter(savedId => savedId !== id);
+    saveState();
+    await logAction({ title: 'Scam Alert Deleted', description: 'A saved Scam Alert was deleted.', moderator: interaction.user, reason: alert.title, extra: `Alert ID: \`${id}\`` }).catch(() => {});
+    return interaction.reply(v2Payload({ title: 'Scam Alert Deleted', description: `Deleted **${id} - ${escapeMassMentions(alert.title)}**.`, ephemeral: true }));
+  }
+}
+
 function makeFaqPayload() {
   const items = state.faq?.items || [];
   const container = new ContainerBuilder().addTextDisplayComponents(
@@ -4730,7 +5120,7 @@ async function handleEmojiCheck(interaction) {
 
   return interaction.reply(v2Payload({
     title: 'Custom Emoji Check',
-    description: `${lines.join('\n')}\n\nThe FAQ/tournament/drop panels now use the fetched Discord emoji object directly for button emojis.`,
+    description: `${lines.join('\n')}\n\nThe FAQ/tournament/drop/Scam Alert panels now use the fetched Discord emoji object directly for button emojis.`,
     ephemeral: true,
   }));
 }
@@ -4878,7 +5268,7 @@ function stripEphemeralFlag(payload) {
 
 function loadState() {
   const defaults = {
-    version: 9,
+    version: 10,
     nextBaptismAt: null,
     lockdown: { active: false, channels: {} },
     warnings: {},
@@ -4892,6 +5282,7 @@ function loadState() {
     dmPolls: {},
     pollResultsChannelId: null,
     linkBypassRoleId: null,
+    scamAlerts: { channelId: CONFIG.scamAlertsChannelId, roleId: null, nextNumber: 1, alerts: {}, order: [] },
     tournaments: {
       channelId: null,
       championRoleId: null,
@@ -4936,6 +5327,7 @@ function loadState() {
       censorWarnCooldowns: parsed.censorWarnCooldowns && typeof parsed.censorWarnCooldowns === 'object' ? parsed.censorWarnCooldowns : {},
       dmPolls: parsed.dmPolls && typeof parsed.dmPolls === 'object' ? parsed.dmPolls : {},
       pollResultsChannelId: parsed.pollResultsChannelId || null,
+      scamAlerts: normalizeScamAlertsState(parsed.scamAlerts, defaults.scamAlerts),
       tournaments: normalizeTournamentState(parsed.tournaments, defaults.tournaments),
       chatDrops: normalizeChatDropState(parsed.chatDrops, defaults.chatDrops),
       faq: normalizeFaqState(parsed.faq, defaults.faq),
@@ -4963,6 +5355,7 @@ function loadState() {
           censorWarnCooldowns: parsed.censorWarnCooldowns && typeof parsed.censorWarnCooldowns === 'object' ? parsed.censorWarnCooldowns : {},
           dmPolls: parsed.dmPolls && typeof parsed.dmPolls === 'object' ? parsed.dmPolls : {},
           pollResultsChannelId: parsed.pollResultsChannelId || null,
+          scamAlerts: normalizeScamAlertsState(parsed.scamAlerts, defaults.scamAlerts),
           tournaments: normalizeTournamentState(parsed.tournaments, defaults.tournaments),
           chatDrops: normalizeChatDropState(parsed.chatDrops, defaults.chatDrops),
           faq: normalizeFaqState(parsed.faq, defaults.faq),
