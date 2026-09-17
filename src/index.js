@@ -405,6 +405,14 @@ const commands = [
     .setDescription('Show the current server member count and customer totals.'),
 
   new SlashCommandBuilder()
+    .setName('customerrolefix')
+    .setDescription('Move unverified Customers to the replacement role while protecting safe roles.')
+    .addBooleanOption(o => o
+      .setName('preview')
+      .setDescription('Only count who would be changed without changing any roles.'))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('servergraph')
     .setDescription('Generate a joins vs leaves graph from recorded server activity.')
     .addStringOption(o => o
@@ -1125,21 +1133,12 @@ function inviteUserLabel(user, fallbackId, fallbackUsername = null) {
 async function handleInvites(interaction) {
   const target = interaction.options.getUser('user') || interaction.user;
   const stats = inviteStatsFor(target.id);
-  const totalUses = stats.links.reduce((sum, inv) => sum + Number(inv.uses || 0), 0);
-  const trackingSince = state.inviteTracking?.initializedAt;
   const description = [
-    `**Member**\n${inviteUserLabel(target, target.id)}`,
-    `**Invite Links Created**\n${stats.links.length}`,
-    `**Active Links**\n${stats.activeLinks.length}`,
-    `**Discord-reported Uses Across Saved Links**\n${totalUses}`,
-    `**Tracked Joins**\n${stats.joins.length}`,
-    `**Still in Server**\n${stats.activeJoins.length}`,
-    `**Left Server**\n${stats.left}`,
-    trackingSince ? `**Tracking Since**\n<t:${Math.floor(trackingSince / 1000)}:F>` : null,
-    '',
-    '-# Tracked joins only include members who joined after the invite tracker was initialized and whose invite could be identified.',
-  ].filter(v => v !== null).join('\n\n');
-  return interaction.reply(v2Payload({ title: 'Invite Stats', description }));
+    `**Joined**\n${stats.joins.length}`,
+    `**Left**\n${stats.left}`,
+    `**Current Invites**\n${stats.activeJoins.length}`,
+  ].join('\n\n');
+  return interaction.reply(v2Payload({ title: `Invite Stats - ${target.username}`, description }));
 }
 
 async function handleInviteLinks(interaction) {
@@ -1524,6 +1523,7 @@ client.on('interactionCreate', async interaction => {
       case 'serverinfo': return handleServerInfo(interaction);
       case 'serverstats': return handleServerStats(interaction);
       case 'membercount': return handleMemberCount(interaction);
+      case 'customerrolefix': return handleCustomerRoleFix(interaction);
       case 'servergraph': return handleServerGraph(interaction);
       case 'channelinfo': return handleChannelInfo(interaction);
       case 'avatar': return handleAvatar(interaction);
@@ -3196,6 +3196,168 @@ async function handleMemberCount(interaction) {
       `**Bots**\n${bots.toLocaleString()}\n\n` +
       `**Customers**\n${customers.toLocaleString()}\n\n` +
       `**Last 24 Hours**\n${stats24h.joins.toLocaleString()} joined - ${stats24h.leaves.toLocaleString()} left - Net ${formatSigned(stats24h.net)}`,
+  }));
+}
+
+
+const CUSTOMER_ROLE_FIX = Object.freeze({
+  sourceRoleId: '1537689864827445285',
+  destinationRoleId: '1542046269290315797',
+  protectedRequiredRoleId: '1537689864827445286',
+  safeRoleIds: new Set([
+    '1540199715470315530',
+    '1543902943009312870',
+    '1537689864827445287',
+  ]),
+});
+
+async function handleCustomerRoleFix(interaction) {
+  const guild = interaction.guild;
+  if (!guild) return;
+
+  const preview = interaction.options.getBoolean('preview') ?? false;
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const actor = await guild.members.fetch(interaction.user.id).catch(() => interaction.member);
+  if (!actor?.permissions?.has(PermissionFlagsBits.Administrator)) {
+    return interaction.editReply(v2Edit({
+      title: 'Access Denied',
+      description: 'Administrator permission is required to run this command.',
+    }));
+  }
+
+  const [sourceRole, destinationRole, protectedRole, botMember] = await Promise.all([
+    guild.roles.fetch(CUSTOMER_ROLE_FIX.sourceRoleId).catch(() => null),
+    guild.roles.fetch(CUSTOMER_ROLE_FIX.destinationRoleId).catch(() => null),
+    guild.roles.fetch(CUSTOMER_ROLE_FIX.protectedRequiredRoleId).catch(() => null),
+    guild.members.fetchMe().catch(() => guild.members.me),
+  ]);
+
+  const missing = [];
+  if (!sourceRole) missing.push(CUSTOMER_ROLE_FIX.sourceRoleId);
+  if (!destinationRole) missing.push(CUSTOMER_ROLE_FIX.destinationRoleId);
+  if (!protectedRole) missing.push(CUSTOMER_ROLE_FIX.protectedRequiredRoleId);
+
+  for (const roleId of CUSTOMER_ROLE_FIX.safeRoleIds) {
+    const role = await guild.roles.fetch(roleId).catch(() => null);
+    if (!role) missing.push(roleId);
+  }
+
+  if (missing.length) {
+    return interaction.editReply(v2Edit({
+      title: 'Role Fix Stopped',
+      description: `I could not find these configured role IDs:\n${missing.join('\n')}`,
+    }));
+  }
+
+  if (!botMember?.permissions?.has(PermissionFlagsBits.ManageRoles)) {
+    return interaction.editReply(v2Edit({
+      title: 'Role Fix Stopped',
+      description: 'I need the **Manage Roles** permission before I can run this command.',
+    }));
+  }
+
+  const unmanageable = [sourceRole, destinationRole].filter(role =>
+    role.managed || role.position >= botMember.roles.highest.position
+  );
+
+  if (unmanageable.length) {
+    return interaction.editReply(v2Edit({
+      title: 'Role Fix Stopped',
+      description:
+        `My highest role must be above the roles I need to change.\n\n` +
+        unmanageable.map(role => `- ${role.name} (${role.id})`).join('\n'),
+    }));
+  }
+
+  const members = await guild.members.fetch();
+
+  let changed = 0;
+  let wouldChange = 0;
+  let protectedByRequiredRole = 0;
+  let protectedBySafeRole = 0;
+  let failures = 0;
+  const failedUsers = [];
+
+  for (const member of members.values()) {
+    if (member.user.bot) continue;
+    if (!member.roles.cache.has(CUSTOMER_ROLE_FIX.sourceRoleId)) continue;
+
+    // This role protects the member completely.
+    if (member.roles.cache.has(CUSTOMER_ROLE_FIX.protectedRequiredRoleId)) {
+      protectedByRequiredRole++;
+      continue;
+    }
+
+    // Any one of these roles also protects the member completely.
+    if ([...CUSTOMER_ROLE_FIX.safeRoleIds].some(roleId => member.roles.cache.has(roleId))) {
+      protectedBySafeRole++;
+      continue;
+    }
+
+    wouldChange++;
+    if (preview) continue;
+
+    const alreadyHadDestination = member.roles.cache.has(CUSTOMER_ROLE_FIX.destinationRoleId);
+    let destinationAddedByThisRun = false;
+
+    try {
+      // Add first, remove second, so nobody is temporarily left with neither role.
+      if (!alreadyHadDestination) {
+        await member.roles.add(
+          CUSTOMER_ROLE_FIX.destinationRoleId,
+          `Customer role fix run by ${interaction.user.tag || interaction.user.username} (${interaction.user.id})`
+        );
+        destinationAddedByThisRun = true;
+      }
+
+      await member.roles.remove(
+        CUSTOMER_ROLE_FIX.sourceRoleId,
+        `Customer role fix run by ${interaction.user.tag || interaction.user.username} (${interaction.user.id})`
+      );
+
+      changed++;
+    } catch (error) {
+      failures++;
+      failedUsers.push(`${member.user.tag || member.user.username} (${member.id})`);
+
+      // Roll back the newly-added destination role when the old role could not be removed.
+      if (destinationAddedByThisRun && member.roles.cache.has(CUSTOMER_ROLE_FIX.sourceRoleId)) {
+        await member.roles.remove(
+          CUSTOMER_ROLE_FIX.destinationRoleId,
+          'Rolling back failed customer role fix'
+        ).catch(() => {});
+      }
+
+      console.error(`[ROLE FIX] Could not update ${member.user.tag || member.id}:`, error);
+    }
+  }
+
+  const summary =
+    `**${preview ? 'Would Change' : 'Changed'}**\n${(preview ? wouldChange : changed).toLocaleString()}\n\n` +
+    `**Protected - Has ${CUSTOMER_ROLE_FIX.protectedRequiredRoleId}**\n${protectedByRequiredRole.toLocaleString()}\n\n` +
+    `**Protected - Safe Roles**\n${protectedBySafeRole.toLocaleString()}` +
+    `${preview ? '' : `\n\n**Failed**\n${failures.toLocaleString()}`}` +
+    `${failedUsers.length ? `\n\n**Failed Members**\n${failedUsers.slice(0, 15).join('\n')}${failedUsers.length > 15 ? `\n...and ${failedUsers.length - 15} more` : ''}` : ''}`;
+
+  if (!preview) {
+    await logAction({
+      title: 'Customer Role Fix Complete',
+      description:
+        `Changed **${changed}** member(s). Protected **${protectedByRequiredRole + protectedBySafeRole}** member(s). ` +
+        `${failures ? `Failed on **${failures}** member(s).` : 'No failures.'}`,
+      moderator: interaction.user,
+      extra:
+        `Removed role: ${CUSTOMER_ROLE_FIX.sourceRoleId}\n` +
+        `Added role: ${CUSTOMER_ROLE_FIX.destinationRoleId}\n` +
+        `Required-role protection: ${CUSTOMER_ROLE_FIX.protectedRequiredRoleId}\n` +
+        `Safe roles: ${[...CUSTOMER_ROLE_FIX.safeRoleIds].join(', ')}`,
+    }).catch(() => {});
+  }
+
+  return interaction.editReply(v2Edit({
+    title: preview ? 'Customer Role Fix Preview' : 'Customer Role Fix Complete',
+    description: summary,
   }));
 }
 
