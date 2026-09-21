@@ -12,6 +12,7 @@ The bot can now have natural conversations with members in only the text channel
 - `/aichat remove channel:#channel` - remove a channel.
 - `/aichat list` - list configured AI channels.
 - `/aichat status` - show whether AI is enabled, whether the API key is configured, the model, and channels.
+- `/aichat test` - make a live API request and show staff the exact failure code if it cannot reply.
 - `/aichat enable enabled:true|false` - pause/resume AI globally without deleting the channel list.
 - `/aichat personality instructions:...` - customize how the AI talks.
 - `/aichat resetpersonality` - restore the default Blox & Co. personality.
@@ -52,3 +53,6 @@ git add .
 git commit -m "Add configurable AI chat channels"
 git push
 ```
+
+### AI reliability in v2.21
+AI chat uses `reasoning.effort: none` for fast Discord replies and retries temporary 429/5xx/network failures up to 3 attempts while respecting `Retry-After`. Billing/quota errors are not repeatedly retried.

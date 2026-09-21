@@ -831,6 +831,7 @@ const commands = [
       .addChannelOption(o => o.setName('channel').setDescription('AI channel to remove.').setRequired(true).addChannelTypes(ChannelType.GuildText)))
     .addSubcommand(s => s.setName('list').setDescription('List every channel where AI chat is enabled.'))
     .addSubcommand(s => s.setName('status').setDescription('Show AI chat configuration and API status.'))
+    .addSubcommand(s => s.setName('test').setDescription('Test the OpenAI connection and show the exact result to staff.'))
     .addSubcommand(s => s
       .setName('enable')
       .setDescription('Globally turn AI chat on or off without deleting configured channels.')
@@ -2388,53 +2389,118 @@ function extractOpenAiResponseText(payload) {
   return parts.join('\n').trim();
 }
 
+function openAiRetryAfterMs(response) {
+  const raw = response?.headers?.get?.('retry-after');
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30_000);
+  const at = Date.parse(raw);
+  if (Number.isFinite(at)) return Math.max(0, Math.min(at - Date.now(), 30_000));
+  return null;
+}
+
+function isNonRetryableOpenAiQuotaCode(code) {
+  return new Set([
+    'credit_balance_exhausted',
+    'organization_spend_limit_exceeded',
+    'project_spend_limit_exceeded',
+    'organization_usage_limit_exceeded',
+    'insufficient_quota',
+  ]).has(String(code || '').toLowerCase());
+}
+
+function shouldRetryOpenAiFailure(error) {
+  if (isNonRetryableOpenAiQuotaCode(error?.code)) return false;
+  const status = Number(error?.status || 0);
+  return status === 408 || status === 409 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || error?.name === 'AbortError' || error?.cause?.code === 'UND_ERR_CONNECT_TIMEOUT';
+}
+
+function waitMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+}
+
 async function requestAiChatCompletion({ guild, channel, history }) {
   if (!CONFIG.aiApiKey) throw new Error('OPENAI_API_KEY is not configured.');
 
   const aiState = ensureAiChatState();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
-  timeout.unref?.();
-
   const input = history.slice(-AI_HISTORY_LIMIT).map(turn => ({
     role: turn.role === 'assistant' ? 'assistant' : 'user',
     content: [{ type: 'input_text', text: truncate(turn.content, AI_INPUT_CHAR_LIMIT) }],
   }));
 
-  try {
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${CONFIG.aiApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: CONFIG.aiModel,
-        store: false,
-        max_output_tokens: CONFIG.aiMaxOutputTokens,
-        instructions: `${aiState.personality}\n\nYou are currently chatting in the Discord server "${guild.name}" inside #${channel.name}. Messages from members are prefixed with their display name. Reply to the newest member message, while using the recent conversation only when it helps. Do not include a name prefix for yourself.`,
-        input,
-      }),
-      signal: controller.signal,
-    });
+  const requestBody = {
+    model: CONFIG.aiModel,
+    store: false,
+    // Discord chat should be quick and cheap. GPT-5.6 Luna defaults to medium
+    // reasoning, and max_output_tokens includes reasoning tokens. With a small
+    // output cap that could occasionally leave no visible reply, so disable
+    // reasoning for this conversational use case.
+    reasoning: { effort: 'none' },
+    text: { verbosity: 'low' },
+    max_output_tokens: CONFIG.aiMaxOutputTokens,
+    instructions: `${aiState.personality}\n\nYou are currently chatting in the Discord server "${guild.name}" inside #${channel.name}. Messages from members are prefixed with their display name. Reply to the newest member message, while using the recent conversation only when it helps. Do not include a name prefix for yourself.`,
+    input,
+  };
 
-    const raw = await response.text();
-    let payload = null;
-    try { payload = raw ? JSON.parse(raw) : null; } catch {}
+  const maxAttempts = 3;
+  let lastError = null;
 
-    if (!response.ok) {
-      const detail = payload?.error?.message || raw || `HTTP ${response.status}`;
-      const error = new Error(`OpenAI ${response.status}: ${truncate(detail, 500)}`);
-      error.status = response.status;
-      throw error;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
+    timeout.unref?.();
+
+    try {
+      const response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${CONFIG.aiApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+
+      const raw = await response.text();
+      let payload = null;
+      try { payload = raw ? JSON.parse(raw) : null; } catch {}
+
+      if (!response.ok) {
+        const detail = payload?.error?.message || raw || `HTTP ${response.status}`;
+        const error = new Error(`OpenAI ${response.status}: ${truncate(detail, 500)}`);
+        error.status = response.status;
+        error.code = payload?.error?.code || null;
+        error.type = payload?.error?.type || null;
+        error.requestId = response.headers.get('x-request-id') || null;
+        error.retryAfterMs = openAiRetryAfterMs(response);
+        throw error;
+      }
+
+      const text = extractOpenAiResponseText(payload);
+      if (!text) {
+        const error = new Error(`The AI response did not contain any text (status=${payload?.status || 'unknown'}, incomplete_reason=${payload?.incomplete_details?.reason || 'none'}).`);
+        error.status = 502;
+        error.code = payload?.incomplete_details?.reason || 'empty_output';
+        error.requestId = response.headers.get('x-request-id') || null;
+        throw error;
+      }
+      return text;
+    } catch (error) {
+      lastError = error;
+      const retryable = shouldRetryOpenAiFailure(error);
+      console.warn(`[AI CHAT] OpenAI attempt ${attempt}/${maxAttempts} failed: status=${error?.status || 'network'} code=${error?.code || 'none'} type=${error?.type || 'none'} requestId=${error?.requestId || 'none'} message=${truncate(error?.message || String(error), 600)}`);
+      if (!retryable || attempt >= maxAttempts) throw error;
+
+      const fallback = Math.min(750 * (2 ** (attempt - 1)), 5000);
+      const jitter = Math.floor(Math.random() * 350);
+      const delay = Number.isFinite(error?.retryAfterMs) ? error.retryAfterMs : fallback + jitter;
+      await waitMs(delay);
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const text = extractOpenAiResponseText(payload);
-    if (!text) throw new Error('The AI response did not contain any text.');
-    return text;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw lastError || new Error('OpenAI request failed.');
 }
 
 async function maybeHandleAiChatMessage(message) {
@@ -2551,6 +2617,32 @@ async function handleAiChatCommand(interaction) {
       accentColor: aiState.enabled && CONFIG.aiApiKey ? 0x57F287 : 0xFEE75C,
       ephemeral: true,
     }));
+  }
+
+  if (sub === 'test') {
+    await interaction.deferReply({ ephemeral: true });
+    if (!CONFIG.aiApiKey) return interaction.editReply(v2Payload({ title: 'AI Test Failed', description: '`OPENAI_API_KEY` is not configured.', accentColor: 0xED4245 }));
+    try {
+      const testText = await requestAiChatCompletion({
+        guild: interaction.guild,
+        channel: interaction.channel,
+        history: [{ role: 'user', content: `${interaction.member?.displayName || interaction.user.username}: Reply with exactly: AI connection working` }],
+      });
+      return interaction.editReply(v2Payload({
+        title: 'AI Test Passed',
+        description: `OpenAI replied successfully using \`${CONFIG.aiModel}\`.\n\n**Reply:** ${truncate(escapeMassMentions(testText), 500)}`,
+        accentColor: 0x57F287,
+      }));
+    } catch (error) {
+      const details = [
+        `**HTTP:** ${error?.status || 'Network/timeout'}`,
+        `**Code:** \`${error?.code || 'none'}\``,
+        `**Type:** \`${error?.type || 'none'}\``,
+        error?.requestId ? `**Request ID:** \`${error.requestId}\`` : null,
+        `**Error:** ${truncate(escapeMassMentions(error?.message || String(error)), 800)}`,
+      ].filter(Boolean).join('\n');
+      return interaction.editReply(v2Payload({ title: 'AI Test Failed', description: details, accentColor: 0xED4245 }));
+    }
   }
 
   if (sub === 'enable') {
