@@ -1,6 +1,6 @@
-# Bloxburg Moderation Bot v2.20 - AI Chat Channels
+# Bloxburg Moderation Bot v2.22 - Scam Alert Channel + Live Server Profiles
 
-This build keeps the v2.19 Moderator visibility and PvP tournament visibility fixes, and adds configurable AI chat channels for Blox & Co.
+This build keeps the Moderator visibility, PvP tournament visibility, and v2.21 AI reliability fixes, and upgrades Scam Alerts with a configurable destination channel plus automatic server-profile refreshes.
 
 ## AI chat
 
@@ -50,9 +50,20 @@ The bot uses Node's built-in `fetch`, so no extra npm dependency is required. If
 ```bash
 npm run check
 git add .
-git commit -m "Add configurable AI chat channels"
+git commit -m "Add configurable scam alert channel and live server profile refresh"
 git push
 ```
 
 ### AI reliability in v2.21
 AI chat uses `reasoning.effort: none` for fast Discord replies and retries temporary 429/5xx/network failures up to 3 attempts while respecting `Retry-After`. Billing/quota errors are not repeatedly retried.
+
+
+## Scam Alerts in v2.22
+
+- `/scamalert setchannel channel:#channel` changes the live Scam Alerts destination and saves it in persistent state.
+- Changing the channel automatically reposts every saved alert into the new channel without pinging subscribers again. The old alert post is deleted only after the replacement was successfully posted.
+- `/scamalert repost id:SA-0001` still reposts a single alert to the currently configured Scam Alerts channel.
+- `SCAM_ALERTS_CHANNEL_ID` is now only the initial/fallback channel. A channel chosen with `/scamalert setchannel` survives Railway restarts.
+- Server profiles resolved from invites privately retain the invite code in bot state so the bot can re-resolve the server later. Invite codes are never rendered in the public Scam Alert.
+- Every 10 minutes, saved server profiles are checked for changes. If the server icon, name, description, counts, or resolved owner profile changes, the existing Scam Alert message is edited automatically.
+- Legacy external server profiles from older builds may need `/scamalert addserver` run once again with a valid invite so the bot has a private invite code for future refreshes.

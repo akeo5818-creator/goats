@@ -169,6 +169,7 @@ const CHAT_DROP_MAX = 999_999;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
 const STATUS_ROTATION_INTERVAL_MS = 20_000;
+const SCAM_SERVER_PROFILE_REFRESH_INTERVAL_MS = 10 * 60_000;
 
 const STATUS_ROTATION = [
   { type: ActivityType.Watching, text: () => 'over Bloxburg Store' },
@@ -697,6 +698,14 @@ const commands = [
       .setName('setup')
       .setDescription('Verify the Scam Alerts channel and notification role.'))
     .addSubcommand(s => s
+      .setName('setchannel')
+      .setDescription('Set the Scam Alerts channel and repost all saved alerts there.')
+      .addChannelOption(o => o
+        .setName('channel')
+        .setDescription('Channel where Scam Alerts should be posted.')
+        .setRequired(true)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)))
+    .addSubcommand(s => s
       .setName('create')
       .setDescription('Post a new Scam Alert.')
       .addStringOption(o => o.setName('title').setDescription('Short alert title or scam name.').setRequired(true).setMinLength(2).setMaxLength(100))
@@ -925,6 +934,7 @@ client.once('ready', async () => {
     const guild = await client.guilds.fetch(CONFIG.guildId);
     const scamSetup = await ensureScamAlertsInfrastructure(guild);
     await refreshSavedScamAlertsOnStartup();
+    setInterval(() => refreshChangedScamServerProfiles().catch(error => console.error('[SCAM ALERTS] Periodic server profile refresh failed:', error)), SCAM_SERVER_PROFILE_REFRESH_INTERVAL_MS).unref();
     console.log(`[SCAM ALERTS] Ready: #${scamSetup.channel.name} | ${scamSetup.role.name} (${scamSetup.role.id})`);
   } catch (error) {
     console.error('[SCAM ALERTS] Auto-setup failed:', error);
@@ -5966,6 +5976,7 @@ function normalizeScamAlertsState(raw, defaults) {
     alerts[id] = {
       ...alert,
       id: alert.id || id,
+      messageChannelId: alert.messageChannelId || value.channelId || defaults.channelId || CONFIG.scamAlertsChannelId,
       relatedUsers: Array.isArray(alert.relatedUsers) ? alert.relatedUsers : [],
       serverProfiles: Array.isArray(alert.serverProfiles) ? alert.serverProfiles : [],
       evidenceItems: Array.isArray(alert.evidenceItems) ? alert.evidenceItems : [],
@@ -5979,7 +5990,7 @@ function normalizeScamAlertsState(raw, defaults) {
   return {
     ...defaults,
     ...value,
-    channelId: CONFIG.scamAlertsChannelId,
+    channelId: value.channelId || defaults.channelId || CONFIG.scamAlertsChannelId,
     roleId: value.roleId || null,
     nextNumber: Math.max(Number(value.nextNumber) || 1, highest + 1),
     alerts,
@@ -6005,10 +6016,19 @@ async function ensureScamAlertsRole(guild) {
   return role;
 }
 
+function currentScamAlertsChannelId() {
+  return state.scamAlerts?.channelId || CONFIG.scamAlertsChannelId;
+}
+
+async function fetchScamAlertsChannel(guild, channelId = currentScamAlertsChannelId()) {
+  const channel = channelId ? await guild.channels.fetch(channelId).catch(() => null) : null;
+  if (!channel?.isTextBased()) throw new Error(`Scam Alerts channel ${channelId || 'not configured'} could not be found or is not text-based.`);
+  return channel;
+}
+
 async function ensureScamAlertsInfrastructure(guild) {
   const role = await ensureScamAlertsRole(guild);
-  const channel = await guild.channels.fetch(CONFIG.scamAlertsChannelId).catch(() => null);
-  if (!channel?.isTextBased()) throw new Error(`Scam Alerts channel ${CONFIG.scamAlertsChannelId} could not be found or is not text-based.`);
+  const channel = await fetchScamAlertsChannel(guild);
   state.scamAlerts.channelId = channel.id;
   saveState();
   return { role, channel };
@@ -6141,6 +6161,9 @@ async function buildScamServerProfile(inviteInput, ownerId = null) {
     approximateMemberCount: invite.approximateMemberCount ?? null,
     approximatePresenceCount: invite.approximatePresenceCount ?? null,
     owner: owner ? { id: owner.id, username: owner.username, fullUsername: owner.fullUsername, globalName: owner.globalName, createdAt: owner.createdAt } : null,
+    // Kept only in persistent bot state so the bot can re-resolve the server
+    // later if its name/icon/description changes. This is never rendered publicly.
+    inviteCode: invite.code || raw,
     resolvedAt: Date.now(),
   };
 }
@@ -6174,7 +6197,77 @@ function getScamAlert(id) {
 
 function scamAlertMessageUrl(alert) {
   if (!alert?.messageId) return null;
-  return `https://discord.com/channels/${CONFIG.guildId}/${CONFIG.scamAlertsChannelId}/${alert.messageId}`;
+  const channelId = alert.messageChannelId || currentScamAlertsChannelId();
+  return channelId ? `https://discord.com/channels/${CONFIG.guildId}/${channelId}/${alert.messageId}` : null;
+}
+
+async function refreshOneScamServerProfile(existing) {
+  if (!existing?.id) return { profile: existing, changed: false };
+
+  let invite = null;
+  let guildLike = null;
+  const savedInvite = String(existing.inviteCode || '').trim();
+  if (savedInvite) {
+    invite = await client.fetchInvite(savedInvite, { withCounts: true, withExpiration: true }).catch(() => null);
+    if (invite?.guild?.id === existing.id) guildLike = invite.guild;
+  }
+
+  // Legacy alerts created before invite codes were retained can still stay live
+  // when this bot is a member of the reported server.
+  let sharedGuild = client.guilds.cache.get(existing.id) || null;
+  if (!sharedGuild) sharedGuild = await client.guilds.fetch(existing.id).catch(() => null);
+  if (!guildLike && sharedGuild) guildLike = sharedGuild;
+  if (!guildLike) return { profile: existing, changed: false };
+
+  let owner = existing.owner || null;
+  let ownerId = owner?.id || sharedGuild?.ownerId || null;
+  if (!ownerId && sharedGuild?.fetchOwner) {
+    const fetchedOwner = await sharedGuild.fetchOwner().catch(() => null);
+    ownerId = fetchedOwner?.id || null;
+  }
+  if (ownerId) {
+    const freshOwner = await buildScamRelatedUser(ownerId);
+    owner = {
+      ...(owner || {}),
+      id: freshOwner.id || ownerId,
+      username: freshOwner.username || owner?.username || null,
+      fullUsername: freshOwner.fullUsername || owner?.fullUsername || null,
+      globalName: freshOwner.globalName || owner?.globalName || null,
+      createdAt: freshOwner.createdAt || owner?.createdAt || snowflakeCreatedAtMs(ownerId) || null,
+    };
+  }
+
+  const iconUrl = typeof guildLike.iconURL === 'function'
+    ? guildLike.iconURL({ size: 256, forceStatic: false })
+    : existing.iconUrl || null;
+  const profile = {
+    ...existing,
+    id: guildLike.id || existing.id,
+    name: guildLike.name || existing.name,
+    iconUrl: iconUrl || null,
+    description: guildLike.description ?? existing.description ?? null,
+    approximateMemberCount: invite?.approximateMemberCount ?? sharedGuild?.memberCount ?? existing.approximateMemberCount ?? null,
+    approximatePresenceCount: invite?.approximatePresenceCount ?? existing.approximatePresenceCount ?? null,
+    owner,
+    inviteCode: invite?.code || existing.inviteCode || null,
+    resolvedAt: Date.now(),
+  };
+
+  // resolvedAt alone should not make every periodic check rewrite the message.
+  const comparableOld = { ...existing, resolvedAt: null };
+  const comparableNew = { ...profile, resolvedAt: null };
+  return { profile, changed: JSON.stringify(comparableOld) !== JSON.stringify(comparableNew) };
+}
+
+async function refreshScamServerProfiles(alert) {
+  alert.serverProfiles ||= [];
+  let changed = false;
+  for (let i = 0; i < alert.serverProfiles.length; i++) {
+    const result = await refreshOneScamServerProfile(alert.serverProfiles[i]);
+    if (result.changed) changed = true;
+    alert.serverProfiles[i] = result.profile;
+  }
+  return changed;
 }
 
 async function refreshScamAlertProfiles(alert) {
@@ -6203,15 +6296,7 @@ async function refreshScamAlertProfiles(alert) {
     alert.servers = resolved.remainingText;
     changed = true;
   }
-  alert.serverProfiles ||= [];
-  for (let i = 0; i < alert.serverProfiles.length; i++) {
-    const existing = alert.serverProfiles[i];
-    if (existing.owner?.id) {
-      const owner = await buildScamRelatedUser(existing.owner.id);
-      alert.serverProfiles[i].owner = { ...existing.owner, id: owner.id, username: owner.username, fullUsername: owner.fullUsername, globalName: owner.globalName, createdAt: owner.createdAt };
-      changed = true;
-    }
-  }
+  if (await refreshScamServerProfiles(alert)) changed = true;
   return changed;
 }
 
@@ -6375,31 +6460,47 @@ async function prepareScamAlertForRender(alert) {
   }
 }
 
-async function postScamAlert(alert, { notify = true, replaceOld = false } = {}) {
+async function postScamAlert(alert, { notify = true, replaceOld = false, prepare = true } = {}) {
   const guild = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId);
   const { channel, role } = await ensureScamAlertsInfrastructure(guild);
-  await prepareScamAlertForRender(alert);
-  if (replaceOld && alert.messageId) {
-    const old = await channel.messages.fetch(alert.messageId).catch(() => null);
-    if (old) await old.delete().catch(() => {});
-    alert.messageId = null;
-  }
+  if (prepare) await prepareScamAlertForRender(alert);
+
+  const previousMessageId = replaceOld ? alert.messageId : null;
+  const previousChannelId = replaceOld ? (alert.messageChannelId || currentScamAlertsChannelId()) : null;
+
   if (notify) await ghostPingScamAlertsRole(channel, role);
   const message = await channel.send(makeScamAlertPayload(alert));
   alert.messageId = message.id;
+  alert.messageChannelId = channel.id;
   alert.updatedAt = Date.now();
   saveState();
+
+  // Delete the previous post only after the replacement successfully exists.
+  if (previousMessageId && !(previousMessageId === message.id && previousChannelId === channel.id)) {
+    const oldChannel = previousChannelId ? await guild.channels.fetch(previousChannelId).catch(() => null) : null;
+    if (oldChannel?.isTextBased()) {
+      const old = await oldChannel.messages.fetch(previousMessageId).catch(() => null);
+      if (old) await old.delete().catch(() => {});
+    }
+  }
   return message;
 }
 
-async function refreshScamAlertMessage(alert) {
+async function refreshScamAlertMessage(alert, { prepare = true } = {}) {
   const guild = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId);
   const { channel } = await ensureScamAlertsInfrastructure(guild);
-  await prepareScamAlertForRender(alert);
+  if (prepare) await prepareScamAlertForRender(alert);
+
+  const messageChannelId = alert.messageChannelId || channel.id;
+  if (messageChannelId !== channel.id) {
+    return postScamAlert(alert, { notify: false, replaceOld: true, prepare: false });
+  }
+
   let message = alert.messageId ? await channel.messages.fetch(alert.messageId).catch(() => null) : null;
-  if (!message) return postScamAlert(alert, { notify: false });
+  if (!message) return postScamAlert(alert, { notify: false, prepare: false });
   const payload = makeScamAlertPayload(alert);
   await message.edit({ ...payload, attachments: [] });
+  alert.messageChannelId = channel.id;
   alert.updatedAt = Date.now();
   saveState();
   return message;
@@ -6415,6 +6516,32 @@ async function refreshSavedScamAlertsOnStartup() {
     } catch (error) {
       console.error(`[SCAM ALERTS] Could not refresh ${id} on startup:`, error?.message || error);
     }
+  }
+}
+
+let scamServerProfileRefreshBusy = false;
+async function refreshChangedScamServerProfiles() {
+  if (scamServerProfileRefreshBusy) return;
+  scamServerProfileRefreshBusy = true;
+  try {
+    state.scamAlerts = normalizeScamAlertsState(state.scamAlerts, { channelId: CONFIG.scamAlertsChannelId, roleId: null, nextNumber: 1, alerts: {}, order: [] });
+    const ids = (state.scamAlerts.order || []).filter(id => state.scamAlerts.alerts[id]);
+    for (const id of ids) {
+      const alert = state.scamAlerts.alerts[id];
+      if (!Array.isArray(alert.serverProfiles) || !alert.serverProfiles.length) continue;
+      try {
+        const changed = await refreshScamServerProfiles(alert);
+        if (!changed) continue;
+        alert.updatedAt = Date.now();
+        saveState();
+        await refreshScamAlertMessage(alert, { prepare: false });
+        console.log(`[SCAM ALERTS] Refreshed changed server profile(s) on ${alert.id}.`);
+      } catch (error) {
+        console.error(`[SCAM ALERTS] Could not refresh server profile(s) on ${alert.id}:`, error?.message || error);
+      }
+    }
+  } finally {
+    scamServerProfileRefreshBusy = false;
   }
 }
 
@@ -6554,6 +6681,46 @@ async function handleScamAlertCommand(interaction) {
     }));
   }
 
+  if (sub === 'setchannel') {
+    const newChannel = interaction.options.getChannel('channel', true);
+    if (!newChannel?.isTextBased()) return fail(interaction, 'Invalid Channel', 'Choose a text or announcement channel.');
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const oldChannelId = currentScamAlertsChannelId();
+    state.scamAlerts.channelId = newChannel.id;
+    saveState();
+
+    const ids = [...(state.scamAlerts.order || [])].filter(id => state.scamAlerts.alerts[id]).reverse();
+    let reposted = 0;
+    const failures = [];
+    for (const id of ids) {
+      const alert = state.scamAlerts.alerts[id];
+      try {
+        await postScamAlert(alert, { notify: false, replaceOld: true });
+        reposted++;
+      } catch (error) {
+        failures.push(`${id}: ${error?.message || error}`);
+      }
+    }
+
+    const movedText = oldChannelId === newChannel.id
+      ? `Scam Alerts will continue using ${newChannel}.`
+      : `Scam Alerts now use ${newChannel} instead of <#${oldChannelId}>.`;
+    const failureText = failures.length
+      ? `
+
+**Failed to repost:** ${failures.length}
+${failures.slice(0, 5).map(line => `- ${escapeMassMentions(line)}`).join('\n')}`
+      : '';
+    return interaction.editReply(v2Edit({
+      title: `${customEmojiText('alert')} Scam Alerts Channel Updated`,
+      description: `${movedText}
+
+**Saved alerts reposted:** ${reposted}/${ids.length}
+Subscribers were not pinged again during the channel move.${failureText}`,
+    }));
+  }
+
   if (sub === 'create') {
     const ids = parseScamUserIds(interaction.options.getString('users', true));
     if (!ids.length) return fail(interaction, 'No Valid User IDs', 'Provide at least one Discord user ID or mention.');
@@ -6576,6 +6743,7 @@ async function handleScamAlertCommand(interaction) {
       createdBy: interaction.user.id,
       updatedAt: Date.now(),
       messageId: null,
+      messageChannelId: currentScamAlertsChannelId(),
     };
     if (alert.servers) {
       const resolved = await resolveScamServerProfilesFromText(alert, alert.servers);
@@ -6586,8 +6754,8 @@ async function handleScamAlertCommand(interaction) {
     state.scamAlerts.order.unshift(id);
     saveState();
     const message = await postScamAlert(alert, { notify: true });
-    await logAction({ title: 'Scam Alert Created', description: `${customEmojiText('alert')} A new staff safety alert was posted.`, moderator: interaction.user, reason: alert.title, extra: `Alert ID: \`${alert.id}\`\nChannel: <#${CONFIG.scamAlertsChannelId}>\nRelated users: ${relatedUsers.length}` }).catch(() => {});
-    return interaction.editReply(v2Edit({ title: 'Scam Alert Posted', description: `${customEmojiText('alert')} **${alert.id}** was posted in <#${CONFIG.scamAlertsChannelId}>.\n\n[Open alert](${message.url})` }));
+    await logAction({ title: 'Scam Alert Created', description: `${customEmojiText('alert')} A new staff safety alert was posted.`, moderator: interaction.user, reason: alert.title, extra: `Alert ID: \`${alert.id}\`\nChannel: <#${currentScamAlertsChannelId()}>\nRelated users: ${relatedUsers.length}` }).catch(() => {});
+    return interaction.editReply(v2Edit({ title: 'Scam Alert Posted', description: `${customEmojiText('alert')} **${alert.id}** was posted in <#${currentScamAlertsChannelId()}>.\n\n[Open alert](${message.url})` }));
   }
 
   if (sub === 'edit') {
@@ -6742,7 +6910,8 @@ async function handleScamAlertCommand(interaction) {
     const id = String(interaction.options.getString('id', true)).trim().toUpperCase();
     const alert = getScamAlert(id);
     if (!alert) return fail(interaction, 'Alert Not Found', 'No saved Scam Alert matches that ID.');
-    const channel = await interaction.guild.channels.fetch(CONFIG.scamAlertsChannelId).catch(() => null);
+    const alertChannelId = alert.messageChannelId || currentScamAlertsChannelId();
+    const channel = await interaction.guild.channels.fetch(alertChannelId).catch(() => null);
     if (channel?.isTextBased() && alert.messageId) {
       const message = await channel.messages.fetch(alert.messageId).catch(() => null);
       if (message) await message.delete().catch(() => {});
@@ -7023,7 +7192,7 @@ function stripEphemeralFlag(payload) {
 
 function loadState() {
   const defaults = {
-    version: 13,
+    version: 14,
     nextBaptismAt: null,
     lockdown: { active: false, channels: {} },
     warnings: {},
