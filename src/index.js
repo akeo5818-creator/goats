@@ -858,8 +858,9 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('dmall')
-    .setDescription('DM a plain-text announcement to all members or one role.')
-    .addStringOption(o => o.setName('message').setDescription('Plain-text message to send.').setRequired(true).setMinLength(1).setMaxLength(2000))
+    .setDescription('DM text, an image, or both to all members or one role.')
+    .addStringOption(o => o.setName('message').setDescription('Optional text message to send.').setRequired(false).setMinLength(1).setMaxLength(2000))
+    .addAttachmentOption(o => o.setName('image').setDescription('Optional image to include with the DM.').setRequired(false))
     .addRoleOption(o => o.setName('role').setDescription('Optional role. Only members with this role will be DMed.'))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(c => {
@@ -4605,14 +4606,49 @@ async function handleDmPollClose(interaction) {
 
 async function handleDmAll(interaction) {
   if (!(await requirePermission(interaction, PermissionFlagsBits.Administrator))) return;
-  const message = interaction.options.getString('message', true).trim();
+
+  const rawMessage = interaction.options.getString('message');
+  const message = rawMessage?.trim() || '';
+  const image = interaction.options.getAttachment('image');
   const role = interaction.options.getRole('role');
+
+  if (!message && !image) {
+    return fail(interaction, 'Nothing To Send', 'Add a **message**, an **image**, or both.');
+  }
+
+  let imageFile = null;
+  if (image) {
+    const contentType = String(image.contentType || '').toLowerCase();
+    const imageName = String(image.name || 'image').trim() || 'image';
+    const looksLikeImage = contentType.startsWith('image/') || /\.(?:png|jpe?g|gif|webp|bmp|avif)$/i.test(imageName);
+
+    if (!looksLikeImage) {
+      return fail(interaction, 'Invalid Image', 'The `image` attachment must be an image file.');
+    }
+
+    try {
+      const response = await fetch(image.url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (!bytes.length) throw new Error('Downloaded image was empty.');
+      imageFile = { attachment: bytes, name: imageName };
+    } catch (error) {
+      console.error('[DMALL] Could not download broadcast image:', error);
+      return fail(interaction, 'Image Download Failed', 'I could not prepare that image for the broadcast. Please upload it again and retry.');
+    }
+  }
+
+  const payloadSummary = message && imageFile
+    ? 'the text and image'
+    : imageFile
+      ? 'the image'
+      : 'the text message';
 
   await interaction.reply(v2Payload({
     title: 'DM Broadcast Starting',
     description: role
-      ? `Sending the plain-text message only to non-bot members with ${role}. Members with closed DMs will be counted as failed deliveries.`
-      : 'Sending the plain-text message to every non-bot member. Members with closed DMs will be counted as failed deliveries.',
+      ? `Sending ${payloadSummary} only to non-bot members with ${role}. Members with closed DMs will be counted as failed deliveries.`
+      : `Sending ${payloadSummary} to every non-bot member. Members with closed DMs will be counted as failed deliveries.`,
     accentColor: 0x5865F2,
     ephemeral: true,
   }));
@@ -4642,13 +4678,14 @@ async function handleDmAll(interaction) {
       const member = queue.shift();
       if (!member) break;
       try {
-        await member.send({
-          content: message,
-          allowedMentions: { parse: [] },
-        });
+        const dmPayload = { allowedMentions: { parse: [] } };
+        if (message) dmPayload.content = message;
+        if (imageFile) dmPayload.files = [imageFile];
+        await member.send(dmPayload);
         sent++;
-      } catch {
+      } catch (error) {
         failed++;
+        console.warn(`[DMALL] Failed to DM ${member.user.tag} (${member.id}):`, error?.message || error);
       }
     }
   });
@@ -4656,17 +4693,22 @@ async function handleDmAll(interaction) {
   await Promise.all(workers);
 
   const scopeText = role ? `members with ${role}` : 'all non-bot server members';
+  const logParts = [];
+  if (role) logParts.push(`Role: ${role} (\`${role.id}\`)`);
+  if (message) logParts.push(`Message:\n${truncate(escapeMassMentions(message), 1200)}`);
+  if (image) logParts.push(`Image: **${escapeMassMentions(image.name || 'image')}**`);
+
   await logAction({
     title: 'DM Broadcast Complete',
     description: `A DM broadcast to ${scopeText} finished. **${sent}** delivered and **${failed}** failed out of **${recipients.length}** attempted recipient(s).`,
     moderator: interaction.user,
-    extra: `${role ? `Role: ${role} (\`${role.id}\`)\n` : ''}Message:\n${truncate(escapeMassMentions(message), 1200)}`,
+    extra: logParts.join('\n'),
     accentColor: failed ? 0xFEE75C : 0x57F287,
   });
 
   return interaction.editReply(v2Edit({
     title: 'DM Broadcast Complete',
-    description: `${role ? `**Role:** ${role}\n` : '**Target:** Everyone\n'}**Delivered:** ${sent}\n**Failed:** ${failed}\n**Attempted:** ${recipients.length}\n\nFailed deliveries usually mean that member has DMs disabled or is blocking the bot.`,
+    description: `${role ? `**Role:** ${role}\n` : '**Target:** Everyone\n'}**Content:** ${message && imageFile ? 'Text + image' : imageFile ? 'Image only' : 'Text only'}\n**Delivered:** ${sent}\n**Failed:** ${failed}\n**Attempted:** ${recipients.length}\n\nFailed deliveries usually mean that member has DMs disabled or is blocking the bot.`,
     accentColor: failed ? 0xFEE75C : 0x57F287,
   }));
 }
