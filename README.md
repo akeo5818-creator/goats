@@ -1,3 +1,73 @@
+# Bloxburg Store — Live Invite Competition (v2.24)
+
+The existing moderation features have been retained. This build adds an invite
+competition powered by the existing invite tracker and the server's custom
+emojis (`giveaway`, `Gift`, `member`, `mail`, `alert`). The emoji files are not
+needed in the bot package: the server's current custom emoji IDs are used.
+
+## Commands
+
+- `/invitecomp` **publicly posts** a paged, live leaderboard. Each row shows only
+  rank, invited-by username, and number of **eligible people still in the server**.
+  The bot updates this message after joins/leaves, periodically checks membership
+  to account for downtime, and keeps its message ID in persisted state. Running
+  the command again replaces the tracked board for that channel.
+- `/invites` shows public current valid invite stats and the number of additional
+  invites required to surpass #3, #2 and #1. Also works in bot DMs (global slash
+  commands can take some time to propagate) and gets the caller's personal link.
+- `/myinvite` creates or retrieves a unique, permanent personal invite for the
+  requesting member, including in bot DMs. Members should share this link, not
+  a generic server vanity URL, so invite credit is attributable.
+- `/invitelinks`, `/invitedby`, `/invitehistory`, `/inviterefresh` are retained.
+  `/inviteleaderboard` is a backwards-compatible alias for `/invitecomp`.
+- `/invitereview member: decision: reason:` allows Manage Server staff to
+  approve a flagged referral or disqualify an alt after reviewing evidence.
+
+The bot automatically creates **#invite-buyer-logs** as a private staff channel.
+When a tracked invitee gains the buyer role `1537689864827445286`, the bot
+records who referred them and whether their referral qualifies for rewards.
+This does *not* automatically pay Robux/cash or independently verify payments.
+
+## Counting rules and anti-abuse
+
+- An invite counts only while that *specific invited user* is still in the
+  server. Leaving reduces the inviter's current total by one immediately.
+- Members who rejoin aren't counted twice. The first recorded inviter keeps
+  credit when a member rejoins; multiple users' invite links cannot be used to
+  manufacture repeat credits.
+- Bots, self-invites, accounts under 7 days old and high-risk accounts are
+  excluded. High-risk invitations can be checked and approved/rejected by staff.
+- Discord does not provide reliable proof that two mature accounts belong to
+  the same person, so automatic detection cannot guarantee every alt is caught.
+- The bot cannot retroactively identify which inviter brought in users **before
+  invite tracking began** or if Discord could not resolve the used invite.
+
+## Required setup
+
+- Discord Developer Portal → Bot: **Server Members Intent** must be enabled.
+- Grant the bot: **Manage Server**, **Create Invite**, **Manage Channels**,
+  **View Channels**, **Send Messages**, and **Read Message History**.
+- Keep **Guild Invites** gateway intent as configured. `GUILD_ID` must be set.
+- Optionally configure `INVITE_CHANNEL_ID` in `.env` so personal links lead to
+  your chosen **public** text channel. `INVITE_BUYER_ROLE_ID` defaults to the
+  buyer role specified above.
+- Existing `data/state.json` should stay on your current server / Railway
+  persistent volume. **Do not overwrite your production state.json** when
+  deploying this code. Emoji assets from the provided pack are referenced by
+  server IDs and do not need to be uploaded twice.
+- Global `/invites` and `/myinvite` commands register at startup and may take
+  a while to become available in bot DMs.
+
+Run `npm install` and `npm start` (Node.js 22+). From your existing Git repo:
+
+```bash
+git add .
+git commit -m "Add live invite competition and anti-fake invite tracking"
+git push
+```
+
+---
+
 # Bloxburg Moderation Bot v2.22 - Scam Alert Channel + Live Server Profiles
 
 This build keeps the Moderator visibility, PvP tournament visibility, and v2.21 AI reliability fixes, and upgrades Scam Alerts with a configurable destination channel plus automatic server-profile refreshes.

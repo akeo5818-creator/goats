@@ -6,6 +6,8 @@ import {
   ButtonStyle,
   ChannelType,
   Client,
+  InteractionContextType,
+  ApplicationIntegrationType,
   ContainerBuilder,
   GatewayIntentBits,
   MediaGalleryBuilder,
@@ -53,6 +55,8 @@ const CONFIG = {
   lockdownCategoryId: process.env.LOCKDOWN_CATEGORY_ID || '1537689865267974192',
   baptismChannelId: process.env.BAPTISM_CHANNEL_ID || '1537689865267974193',
   modLogChannelId: process.env.MOD_LOG_CHANNEL_ID || '1537728472997306389',
+  buyerRoleId: process.env.INVITE_BUYER_ROLE_ID || '1537689864827445286',
+  competitionInviteChannelId: process.env.INVITE_CHANNEL_ID || null,
   dmLogChannelId: process.env.DM_LOG_CHANNEL_ID || '1541705487052046408',
   scamAlertsChannelId: process.env.SCAM_ALERTS_CHANNEL_ID || '1545949982467555389',
   pollResultsChannelId: process.env.POLL_RESULTS_CHANNEL_ID || null,
@@ -106,6 +110,11 @@ const CUSTOM_EMOJI_SPECS = {
   giveaway: { id: GIVEAWAY_EMOJI_ID, name: GIVEAWAY_EMOJI_NAME, animated: false },
   ticket: { id: TICKET_EMOJI_ID, name: TICKET_EMOJI_NAME, animated: false },
   alert: { id: SCAM_ALERT_EMOJI_ID, name: SCAM_ALERT_EMOJI_NAME, animated: false },
+  member: { id: '1538105368293408819', name: 'member', animated: false },
+  cash: { id: '1239028597591773235', name: 'cash', animated: false },
+  robux: { id: '1537693366286946395', name: 'robux', animated: false },
+  gift: { id: '1545596578113519657', name: 'Gift', animated: false },
+  mail: { id: '1537693361950040074', name: 'mail', animated: false },
 };
 const resolvedCustomEmojis = new Map();
 
@@ -221,6 +230,17 @@ const client = new Client({
 
 const inviteSnapshot = new Map();
 let inviteDetectionQueue = Promise.resolve();
+let inviteLeaderboardTimer = null;
+let inviteMemberReconcilePromise = null;
+let inviteMemberCache = null;
+const inviteRecentPresenceEvents = new Map();
+const INVITE_COMP_PAGE_SIZE = 10;
+const INVITE_ACCOUNT_MIN_AGE_MS = 7 * 24 * 60 * 60_000;
+const INVITE_MEMBER_RECONCILE_MS = 15 * 60_000;
+// Discord exposes invite-use deltas, not real-person/alt identities. Account age,
+// repeat joins, bot accounts, self-invites and high-risk patterns are guarded;
+// suspected evasion should still be reviewed by human staff.
+
 
 // Every command in this set uses one stable Discord visibility gate. The
 // configured Moderator role is kept on that gate automatically at startup,
@@ -799,8 +819,16 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('invites')
-    .setDescription('View invite stats for yourself or another member.')
+    .setDescription('Public invite stats, your personal link, and distance to the top 3.')
     .addUserOption(o => o.setName('user').setDescription('Member to inspect. Defaults to you.')),
+
+  new SlashCommandBuilder()
+    .setName('invitecomp')
+    .setDescription('Post the live, paginated invite competition leaderboard.'),
+
+  new SlashCommandBuilder()
+    .setName('myinvite')
+    .setDescription('Get your own tracked invite link to share with Bloxburg players.'),
 
   new SlashCommandBuilder()
     .setName('invitelinks')
@@ -825,6 +853,14 @@ const commands = [
   new SlashCommandBuilder()
     .setName('inviterefresh')
     .setDescription('Rescan all active server invites into the tracker.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('invitereview')
+    .setDescription('Staff review: approve or reject a tracked invitation after checking for alts.')
+    .addUserOption(o => o.setName('member').setDescription('Invited member to review.').setRequired(true))
+    .addStringOption(o => o.setName('decision').setDescription('Allow or disqualify this member.').setRequired(true).addChoices({ name: 'Approve', value: 'approve' }, { name: 'Reject', value: 'reject' }))
+    .addStringOption(o => o.setName('reason').setDescription('Reason for staff decision.').setMaxLength(400))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
@@ -894,7 +930,19 @@ client.once('ready', async () => {
   try {
     const rest = new REST({ version: '10' }).setToken(CONFIG.token);
     await rest.put(Routes.applicationGuildCommands(client.user.id, CONFIG.guildId), { body: commands });
-    console.log(`[COMMANDS] Registered ${commands.length} guild commands.`);
+    const dmEnabled = ['invites', 'myinvite'].map(name => {
+      const entry = commands.find(c => c.name === name);
+      return new SlashCommandBuilder()
+        .setName(name)
+        .setDescription(entry.description)
+        .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM)
+        .setIntegrationTypes(ApplicationIntegrationType.GuildInstall)
+        .toJSON();
+    });
+    // Global slash commands are necessary for DM usage; the server-specific
+    // definitions of these same commands take precedence inside the guild.
+    for (const command of dmEnabled) await rest.post(Routes.applicationCommands(client.user.id), { body: command });
+    console.log(`[COMMANDS] Registered ${commands.length} guild commands plus DM-capable /invites and /myinvite.`);
   } catch (error) {
     console.error('[COMMANDS] Registration failed:', error);
   }
@@ -917,6 +965,11 @@ client.once('ready', async () => {
     const guild = await client.guilds.fetch(CONFIG.guildId);
     const count = await initializeInviteTracking(guild);
     console.log(`[INVITES] Tracking ${count} active invite link(s).`);
+    await ensureInviteBuyerLogChannel(guild).catch(error => console.error('[INVITE BUYER LOGS] Auto channel setup failed:', error));
+    // Asynchronous full member scan to catch departures during downtime.
+    reconcileInviteMembership(guild).catch(error => console.error('[INVITE COMP] Initial member sync failed:', error));
+    setInterval(() => reconcileInviteMembership(guild).catch(error => console.error('[INVITE COMP] Periodic member sync failed:', error)), INVITE_MEMBER_RECONCILE_MS).unref();
+    setInterval(() => refreshPostedInviteLeaderboards().catch(error => console.error('[INVITE COMP] Periodic live refresh failed:', error)), 2 * 60_000).unref();
   } catch (error) {
     console.error('[INVITES] Initial invite snapshot failed:', error);
   }
@@ -994,6 +1047,8 @@ function ensureInviteTrackingState() {
   if (!state.inviteTracking.invites || typeof state.inviteTracking.invites !== 'object') state.inviteTracking.invites = {};
   if (!Array.isArray(state.inviteTracking.joins)) state.inviteTracking.joins = [];
   if (!state.inviteTracking.memberSources || typeof state.inviteTracking.memberSources !== 'object') state.inviteTracking.memberSources = {};
+  if (!Array.isArray(state.inviteTracking.leaderboards)) state.inviteTracking.leaderboards = [];
+  if (!state.inviteTracking.buyerConversions || typeof state.inviteTracking.buyerConversions !== 'object') state.inviteTracking.buyerConversions = {};
   return state.inviteTracking;
 }
 
@@ -1012,8 +1067,9 @@ function rememberInvite(invite, active = true) {
   const record = {
     ...previous,
     code,
-    creatorId: invite.inviter?.id || previous.creatorId || null,
-    creatorUsername: invite.inviter?.username || previous.creatorUsername || null,
+    ownerId: previous.ownerId || null,
+    creatorId: previous.ownerId || invite.inviter?.id || previous.creatorId || null,
+    creatorUsername: previous.ownerId ? (previous.creatorUsername || null) : (invite.inviter?.username || previous.creatorUsername || null),
     channelId: invite.channelId || invite.channel?.id || previous.channelId || null,
     createdAt: invite.createdTimestamp || previous.createdAt || Date.now(),
     uses: Number.isFinite(invite.uses) ? invite.uses : Number(previous.uses || 0),
@@ -1035,7 +1091,7 @@ function updateInviteSnapshotEntry(invite) {
     code: String(invite.code),
     uses: Number(invite.uses || 0),
     maxUses: Number(invite.maxUses || 0),
-    creatorId: invite.inviter?.id || state.inviteTracking?.invites?.[invite.code]?.creatorId || null,
+    creatorId: state.inviteTracking?.invites?.[invite.code]?.ownerId || invite.inviter?.id || state.inviteTracking?.invites?.[invite.code]?.creatorId || null,
     creatorUsername: invite.inviter?.username || state.inviteTracking?.invites?.[invite.code]?.creatorUsername || null,
     channelId: invite.channelId || invite.channel?.id || null,
     createdAt: invite.createdTimestamp || Date.now(),
@@ -1072,21 +1128,43 @@ async function refreshInviteSnapshot(guild) {
 
 function recordInviteJoin(member, source) {
   const tracking = ensureInviteTrackingState();
+  // Discord can dispatch the same join twice during reconnects. It must never
+  // create two credits for one invitee.
+  const stillActive = tracking.joins.findLast(j => j?.memberId === member.id && !j.leftAt);
+  if (stillActive) return stillActive;
+
+  // Rejoining does not create a new invitation credit or allow a user to move
+  // their credit to a different inviter after leaving and joining again.
+  const original = tracking.joins.find(j => j?.memberId === member.id && j.inviterId);
+  const ownerId = original?.inviterId || source.creatorId || null;
+  const assessment = evaluateAltRisk(member);
+  let invalidReason = original ? (original.invalidReason || null) : null;
+  if (!original) {
+    if (!ownerId) invalidReason = 'Could not identify inviter';
+    else if (member.user?.bot) invalidReason = 'Bot account';
+    else if (ownerId === member.id) invalidReason = 'Self-invite';
+    else if (Date.now() - Number(member.user.createdTimestamp || Date.now()) < INVITE_ACCOUNT_MIN_AGE_MS) invalidReason = 'Discord account younger than 7 days';
+    else if (assessment.score >= 60) invalidReason = 'Suspicious account pattern (manual review needed)';
+  }
   const join = {
     id: `IJ-${Date.now().toString(36).toUpperCase()}-${makeId()}`,
     memberId: member.id,
     memberUsername: member.user?.username || null,
     memberDisplayName: member.displayName || member.user?.globalName || null,
-    inviterId: source.creatorId || null,
-    inviterUsername: source.creatorUsername || null,
-    code: source.code || null,
-    channelId: source.channelId || null,
+    inviterId: ownerId,
+    inviterUsername: original?.inviterUsername || source.creatorUsername || null,
+    code: original?.code || source.code || null,
+    channelId: original?.channelId || source.channelId || null,
     joinedAt: Date.now(),
     leftAt: null,
+    invalidReason,
+    manualOverride: original?.manualOverride || null,
+    eligible: original ? original.eligible !== false && !invalidReason : !invalidReason,
   };
   tracking.joins.push(join);
   tracking.joins = tracking.joins.slice(-100000);
   tracking.memberSources[member.id] = join.id;
+  scheduleInviteLeaderboardRefresh();
   return join;
 }
 
@@ -1097,6 +1175,7 @@ function markInviteJoinLeft(memberId) {
     if (join?.memberId === memberId && !join.leftAt) {
       join.leftAt = Date.now();
       saveState();
+      scheduleInviteLeaderboardRefresh();
       return join;
     }
   }
@@ -1125,7 +1204,7 @@ async function detectUsedInviteForMember(member) {
       bestDelta = delta;
       candidate = {
         code: invite.code,
-        creatorId: invite.inviter?.id || prev.creatorId || tracking.invites?.[invite.code]?.creatorId || null,
+        creatorId: tracking.invites?.[invite.code]?.ownerId || invite.inviter?.id || prev.creatorId || tracking.invites?.[invite.code]?.creatorId || null,
         creatorUsername: invite.inviter?.username || prev.creatorUsername || tracking.invites?.[invite.code]?.creatorUsername || null,
         channelId: invite.channelId || invite.channel?.id || prev.channelId || null,
       };
@@ -1169,7 +1248,21 @@ async function detectUsedInviteForMember(member) {
     join = recordInviteJoin(member, candidate);
     console.log(`[INVITES] ${member.user?.tag || member.id} joined via ${candidate.code} created by ${candidate.creatorId || 'unknown creator'}`);
   } else {
-    console.log(`[INVITES] Could not attribute ${member.user?.tag || member.id} to a tracked invite (vanity/unknown/older snapshot).`);
+    const previous = tracking.joins.find(j => j?.memberId === member.id && j.inviterId);
+    if (previous) {
+      join = recordInviteJoin(member, {
+        creatorId: previous.inviterId,
+        creatorUsername: previous.inviterUsername,
+        code: previous.code,
+        channelId: previous.channelId,
+      });
+      console.log(`[INVITES] Rejoin for ${member.id}; restored original inviter without double-credit.`);
+    } else {
+      console.log(`[INVITES] Could not attribute ${member.user?.tag || member.id} to a tracked invite (vanity/unknown/older snapshot).`);
+    }
+  }
+  if (join?.invalidReason) {
+    logRejectedInvite(member, join).catch(error => console.warn('[INVITES] Failed to log excluded referral:', error?.message || error));
   }
   saveState();
   return join;
@@ -1184,17 +1277,40 @@ function queueInviteJoinDetection(member) {
   return inviteDetectionQueue;
 }
 
+function competitionRankings() {
+  const tracking = ensureInviteTrackingState();
+  const newestByInvitee = new Map();
+  for (const join of tracking.joins) {
+    if (join?.memberId) newestByInvitee.set(join.memberId, join);
+  }
+  const totals = new Map();
+  for (const join of newestByInvitee.values()) {
+    if (!join.inviterId || join.leftAt || join.eligible === false || join.invalidReason) continue;
+    if (inviteMemberCache && !inviteMemberCache.has(join.memberId)) continue;
+    if (join.inviterId === join.memberId) continue;
+    const row = totals.get(join.inviterId) || { userId: join.inviterId, count: 0, username: join.inviterUsername || null };
+    row.count++;
+    totals.set(join.inviterId, row);
+  }
+  return [...totals.values()]
+    .filter(row => !inviteMemberCache || inviteMemberCache.has(row.userId))
+    .sort((a, b) => b.count - a.count || a.userId.localeCompare(b.userId));
+}
+
 function inviteStatsFor(userId) {
   const tracking = ensureInviteTrackingState();
   const links = Object.values(tracking.invites).filter(inv => inv?.creatorId === userId);
   const joins = tracking.joins.filter(j => j?.inviterId === userId);
-  const activeJoins = joins.filter(j => !j.leftAt);
+  const unique = new Map();
+  for (const join of joins) unique.set(join.memberId, join);
+  const activeJoins = [...unique.values()].filter(j => !j.leftAt && (!inviteMemberCache || inviteMemberCache.has(j.memberId)));
   return {
     links,
     activeLinks: links.filter(inv => inv.active),
     joins,
     activeJoins,
-    left: joins.length - activeJoins.length,
+    eligibleCount: competitionRankings().find(x => x.userId === userId)?.count || 0,
+    left: [...unique.values()].filter(j => j.leftAt).length,
   };
 }
 
@@ -1230,14 +1346,40 @@ function inviteUserLabel(user, fallbackId, fallbackUsername = null) {
 }
 
 async function handleInvites(interaction) {
+  const isDm = !interaction.inGuild();
   const target = interaction.options.getUser('user') || interaction.user;
+  if (isDm && target.id !== interaction.user.id) return fail(interaction, 'Your Invites', 'In DMs you can only check your own invitations.');
+  await interaction.reply(v2Payload({ title: 'Bloxburg Store | Invites', description: 'Loading your current invite stats...' })); // Public in server, visible in DMs.
   const stats = inviteStatsFor(target.id);
+  const ranks = competitionRankings();
+  const ownRankIndex = ranks.findIndex(row => row.userId === target.id);
+  const ownRank = ownRankIndex < 0 ? 'Unranked' : `#${ownRankIndex + 1}`;
+  const goals = [3, 2, 1].map(rank => {
+    if (ownRankIndex >= 0 && ownRankIndex < rank) return `**#${rank}** — reached`;
+    const threshold = ranks[rank - 1]?.count || 0;
+    const additional = Math.max(1, threshold - stats.eligibleCount + 1);
+    return `**#${rank}** — ${additional} more invite${additional === 1 ? '' : 's'}`;
+  });
+  const personal = target.id === interaction.user.id ? await getOrCreatePersonalInvite(target.id).catch(() => null) : null;
+  const linkText = personal ? `\n${customEmojiText('mail')} **Your personal link**\nhttps://discord.gg/${personal.code}` : '';
   const description = [
-    `**Joined**\n${stats.joins.length}`,
-    `**Left**\n${stats.left}`,
-    `**Current Invites**\n${stats.activeJoins.length}`,
-  ].join('\n\n');
-  return interaction.reply(v2Payload({ title: `Invite Stats - ${target.username}`, description }));
+    `${customEmojiText('member')} **${escapeMassMentions(target.username)}'s Invite Stats**`,
+    `**${stats.eligibleCount}** valid invites currently in the server • **${ownRank}** overall`,
+    '',
+    `${customEmojiText('giveaway')} **Distance to the podium**`,
+    goals.join('\n'),
+    target.id === interaction.user.id ? linkText : '',
+    '',
+    '-# Only valid, tracked invites from members still in the server count. Suspicious or duplicate referrals do not count.',
+  ].filter(x => x !== null).join('\n');
+  return interaction.editReply(v2Edit({ title: 'Bloxburg Store | Invites', description }));
+}
+
+async function handleMyInvite(interaction) {
+  await interaction.reply(v2Payload({ title: 'Your Personal Invite Link', description: 'Preparing your unique invite...', ephemeral: interaction.inGuild() }));
+  const personal = await getOrCreatePersonalInvite(interaction.user.id);
+  if (!personal) return interaction.editReply(v2Edit({ title: 'Invite Link Unavailable', description: 'I could not make a link. An admin must give the bot **Manage Server** and **Create Invite**, or set INVITE_CHANNEL_ID to a public channel.' }));
+  return interaction.editReply(v2Edit({ title: 'Your Personal Invite Link', description: `${customEmojiText('mail')} **https://discord.gg/${personal.code}**\n\nShare this specific link with real Bloxburg players. Valid members count only while they stay in the server.` }));
 }
 
 async function handleInviteLinks(interaction) {
@@ -1262,26 +1404,9 @@ async function handleInviteLinks(interaction) {
 }
 
 async function handleInviteLeaderboard(interaction) {
-  const limit = interaction.options.getInteger('limit') || 10;
-  const tracking = ensureInviteTrackingState();
-  const totals = new Map();
-  for (const join of tracking.joins) {
-    if (!join?.inviterId) continue;
-    const row = totals.get(join.inviterId) || { total: 0, active: 0, username: join.inviterUsername || null };
-    row.total += 1;
-    if (!join.leftAt) row.active += 1;
-    row.username ||= join.inviterUsername || null;
-    totals.set(join.inviterId, row);
-  }
-  const ranking = [...totals.entries()].sort((a, b) => b[1].total - a[1].total || b[1].active - a[1].active).slice(0, limit);
-  if (!ranking.length) return interaction.reply(v2Payload({ title: 'Invite Leaderboard', description: 'No tracked invite joins yet.' }));
-  const lines = [];
-  for (let i = 0; i < ranking.length; i++) {
-    const [userId, row] = ranking[i];
-    const user = await safeFetchUser(userId);
-    lines.push(`**${i + 1}. ${user?.username || row.username || userId}**\nTracked joins: **${row.total}** • Still here: **${row.active}**`);
-  }
-  return interaction.reply(v2Payload({ title: 'Invite Leaderboard', description: `${lines.join('\n\n')}\n\n-# Rankings are based on joins detected by this bot after invite tracking started.` }));
+  // Old command remains available, but now follows the competition's accurate
+  // current-member scoring instead of counting people who left.
+  return handleInviteCompetition(interaction);
 }
 
 async function handleInvitedBy(interaction) {
@@ -1342,6 +1467,268 @@ async function handleInviteRefresh(interaction) {
     console.error('[INVITES] Manual refresh failed:', error);
     return interaction.editReply(v2Edit({ title: 'Invite Refresh Failed', description: 'The bot could not fetch the server invite list. Make sure it has Manage Server / Administrator access.' }));
   }
+}
+
+async function handleInviteReview(interaction) {
+  if (!(await requirePermission(interaction, PermissionFlagsBits.ManageGuild))) return;
+  const member = interaction.options.getUser('member', true);
+  const decision = interaction.options.getString('decision', true);
+  const reason = interaction.options.getString('reason') || 'Staff review';
+  const tracking = ensureInviteTrackingState();
+  const matches = tracking.joins.filter(j => j.memberId === member.id && j.inviterId);
+  if (!matches.length) return fail(interaction, 'No Tracked Referral', 'I do not have a reliably attributed invite for this member.');
+  for (const join of matches) {
+    join.invalidReason = decision === 'approve' ? null : `Rejected by staff: ${reason}`;
+    join.eligible = decision === 'approve';
+    join.manualOverride = { by: interaction.user.id, decision, reason, at: Date.now() };
+  }
+  saveState();
+  scheduleInviteLeaderboardRefresh();
+  const channel = await ensureInviteBuyerLogChannel(interaction.guild).catch(() => null);
+  if (channel) await channel.send(v2Payload({ title: 'Referral Manual Review', description: `<@${member.id}> ${decision === 'approve' ? 'approved' : 'rejected'} by <@${interaction.user.id}>.\n**Reason:** ${escapeMassMentions(reason)}` })).catch(() => {});
+  return interaction.reply(v2Payload({ title: 'Referral Updated', description: `${member.username} has been **${decision === 'approve' ? 'approved' : 'rejected'}** for invite counting. The live leaderboard will update.`, ephemeral: true }));
+}
+
+// ========= BLOXBURG STORE INVITE COMPETITION =========
+function inviteCompSignature(page = 0) {
+  return `${page}|${competitionRankings().map(row => `${row.userId}:${row.count}`).join(',')}`;
+}
+
+function inviteCompPageCount(ranks) {
+  return Math.max(1, Math.ceil(ranks.length / INVITE_COMP_PAGE_SIZE));
+}
+
+function inviteCompPayload(pageNumber = 0, isEdit = false) {
+  const ranks = competitionRankings();
+  const pages = inviteCompPageCount(ranks);
+  const page = Math.max(0, Math.min(pageNumber, pages - 1));
+  const start = page * INVITE_COMP_PAGE_SIZE;
+  const display = ranks.slice(start, start + INVITE_COMP_PAGE_SIZE);
+  const lines = display.map((row, index) => {
+    const place = start + index + 1;
+    const medal = place === 1 ? '🥇' : place === 2 ? '🥈' : place === 3 ? '🥉' : customEmojiText('member');
+    return `${medal} **#${place}** <@${row.userId}> — **${row.count}** invite${row.count === 1 ? '' : 's'}`;
+  });
+  const description = [
+    `${customEmojiText('giveaway')} **LIVE INVITE LEADERBOARD**`,
+    '',
+    lines.length ? lines.join('\n\n') : '*No eligible tracked invites yet. Share your personal link to enter!*',
+    '',
+    `-# Page ${page + 1}/${pages} • Active members only • Refreshes when members join or leave`,
+  ].join('\n');
+  const container = new ContainerBuilder()
+    .setAccentColor(0x3B82F6)
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(`# ${customEmojiText('gift')} Bloxburg Store | Invite Competition\n${description}`));
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('invcomp:first').setLabel('First').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+    new ButtonBuilder().setCustomId('invcomp:prev').setLabel('Previous').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+    new ButtonBuilder().setCustomId('invcomp:next').setLabel('Next').setStyle(ButtonStyle.Primary).setDisabled(page >= pages - 1),
+    new ButtonBuilder().setCustomId('invcomp:last').setLabel('Last').setStyle(ButtonStyle.Secondary).setDisabled(page >= pages - 1),
+  );
+  return { page, payload: {
+    ...(isEdit ? {} : { flags: MessageFlags.IsComponentsV2 }),
+    components: [container, buttons],
+    allowedMentions: { parse: [] },
+  } };
+}
+
+async function handleInviteCompetition(interaction) {
+  if (!interaction.inGuild() || interaction.guildId !== CONFIG.guildId) return;
+  // Public, V2-marked from the *initial* reply (Discord requires this flag).
+  const { page, payload } = inviteCompPayload(0, false);
+  await interaction.reply(payload);
+  const message = await interaction.fetchReply();
+  if (!message?.id) return;
+  const tracking = ensureInviteTrackingState();
+  tracking.leaderboards = tracking.leaderboards.filter(b => b.messageId !== message.id && b.channelId !== message.channelId);
+  tracking.leaderboards.push({ channelId: message.channelId, messageId: message.id, page, lastSignature: inviteCompSignature(page) });
+  tracking.leaderboards = tracking.leaderboards.slice(-30);
+  saveState();
+}
+
+async function handleInviteCompetitionButton(interaction) {
+  if (interaction.guildId !== CONFIG.guildId) return;
+  const tracking = ensureInviteTrackingState();
+  const board = tracking.leaderboards.find(b => b.messageId === interaction.message.id);
+  if (!board) return interaction.reply({ content: 'This leaderboard is no longer being tracked. Run /invitecomp again.', flags: MessageFlags.Ephemeral });
+  const pages = inviteCompPageCount(competitionRankings());
+  const action = interaction.customId.split(':')[1];
+  const page = action === 'first' ? 0 : action === 'last' ? pages - 1 : Math.max(0, Math.min(pages - 1, (board.page || 0) + (action === 'next' ? 1 : -1)));
+  board.page = page;
+  board.lastSignature = inviteCompSignature(page);
+  saveState();
+  return interaction.update(inviteCompPayload(page, true).payload);
+}
+
+function scheduleInviteLeaderboardRefresh() {
+  if (inviteLeaderboardTimer) return;
+  inviteLeaderboardTimer = setTimeout(() => {
+    inviteLeaderboardTimer = null;
+    refreshPostedInviteLeaderboards().catch(error => console.error('[INVITE COMP] Live edit failed:', error));
+  }, 3000);
+  inviteLeaderboardTimer.unref?.();
+}
+
+async function refreshPostedInviteLeaderboards() {
+  const tracking = ensureInviteTrackingState();
+  const boards = [...tracking.leaderboards];
+  let dirty = false;
+  for (const board of boards) {
+    const { page, payload } = inviteCompPayload(board.page || 0, true);
+    const signature = inviteCompSignature(page);
+    if (board.lastSignature === signature) continue;
+    const channel = await client.channels.fetch(board.channelId).catch(() => null);
+    if (!channel?.isTextBased?.()) continue;
+    try {
+      board.page = page;
+      const message = await channel.messages.fetch(board.messageId);
+      await message.edit(payload);
+      board.lastSignature = signature;
+      dirty = true;
+    } catch (error) {
+      if (error?.code === 10008 || error?.code === 10003) {
+        tracking.leaderboards = tracking.leaderboards.filter(b => b.messageId !== board.messageId);
+        dirty = true;
+      } else {
+        console.warn(`[INVITE COMP] Cannot edit ${board.messageId}:`, error?.message || error);
+      }
+    }
+  }
+  if (dirty) saveState();
+}
+
+async function reconcileInviteMembership(guild) {
+  if (inviteMemberReconcilePromise) return inviteMemberReconcilePromise;
+  inviteMemberReconcilePromise = (async () => {
+    // Full guild-member fetch is the authoritative catch-up after bot downtime.
+    // If Discord cannot return the list, keep last known counts rather than
+    // incorrectly reducing every person's score to zero.
+    const scanStartedAt = Date.now();
+    const members = await guild.members.fetch();
+    const ids = new Set([...members.values()].filter(m => !m.user?.bot).map(m => m.id));
+    for (const [id, event] of inviteRecentPresenceEvents.entries()) {
+      if (event.at < scanStartedAt) continue;
+      if (event.present) ids.add(id);
+      else ids.delete(id);
+    }
+    inviteMemberCache = ids;
+    for (const [id, event] of inviteRecentPresenceEvents.entries()) if (Date.now() - event.at > INVITE_MEMBER_RECONCILE_MS * 2) inviteRecentPresenceEvents.delete(id);
+    const tracking = ensureInviteTrackingState();
+    let changes = 0;
+    const latest = new Map();
+    for (const join of tracking.joins) if (join?.memberId) latest.set(join.memberId, join);
+    for (const [memberId, join] of latest.entries()) {
+      if (!ids.has(memberId) && !join.leftAt) { join.leftAt = Date.now(); changes++; }
+      if (ids.has(memberId) && join.leftAt) { join.leftAt = null; changes++; }
+    }
+    tracking.lastMemberSyncAt = Date.now();
+    if (changes) { saveState(); scheduleInviteLeaderboardRefresh(); }
+    console.log(`[INVITE COMP] Reconciled ${ids.size} current members; corrected ${changes} recorded invite(s).`);
+    return changes;
+  })().finally(() => { inviteMemberReconcilePromise = null; });
+  return inviteMemberReconcilePromise;
+}
+
+async function getOrCreatePersonalInvite(userId) {
+  const guild = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId);
+  // Never issue a competition invite to someone who isn't a member already.
+  const requester = await guild.members.fetch(userId).catch(() => null);
+  if (!requester || requester.user?.bot) return null;
+  const tracking = ensureInviteTrackingState();
+  const existing = Object.values(tracking.invites).filter(inv => inv?.ownerId === userId && inv.active).sort((a, b) => b.createdAt - a.createdAt)[0];
+  if (existing) return existing;
+  const fetched = await guild.channels.fetch();
+  const publicChannels = [...fetched.values()].filter(ch => {
+    if (ch?.type !== ChannelType.GuildText) return false;
+    return ch.permissionsFor(guild.roles.everyone)?.has(PermissionFlagsBits.ViewChannel)
+      && ch.permissionsFor(guild.members.me || client.user)?.has(PermissionFlagsBits.CreateInstantInvite);
+  });
+  const channel = publicChannels.find(ch => ch.id === CONFIG.competitionInviteChannelId)
+    || publicChannels.find(ch => ch.id === guild.systemChannelId)
+    || publicChannels.find(ch => /^(general|chat|welcome|rules|announcements)/i.test(ch.name))
+    || publicChannels[0];
+  if (!channel) return null;
+  const user = await safeFetchUser(userId);
+  const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, unique: true, reason: `Invite competition link for ${userId}` });
+  // Bot-created invite links normally belong to the BOT according to Discord.
+  // ownerId permanently overrides that so joins are credited to the requester.
+  const record = rememberInvite(invite, true);
+  record.ownerId = userId;
+  record.creatorId = userId;
+  record.creatorUsername = user?.username || null;
+  updateInviteSnapshotEntry(invite);
+  saveState();
+  return record;
+}
+
+async function ensureInviteBuyerLogChannel(guild) {
+  const tracking = ensureInviteTrackingState();
+  const byId = tracking.buyerLogChannelId ? await guild.channels.fetch(tracking.buyerLogChannelId).catch(() => null) : null;
+  if (byId?.type === ChannelType.GuildText) {
+    if (byId.permissionsFor(guild.roles.everyone)?.has(PermissionFlagsBits.ViewChannel)) throw new Error('invite-buyer-logs has become public. Make it private before writing logs.');
+    return byId;
+  }
+  const channels = await guild.channels.fetch();
+  let channel = channels.find(ch => ch?.type === ChannelType.GuildText && ch.name === 'invite-buyer-logs');
+  if (!channel) {
+    const me = guild.members.me || await guild.members.fetchMe();
+    const permissionOverwrites = [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+      { id: guild.ownerId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    ];
+    if (CONFIG.moderatorRoleId && guild.roles.cache.has(CONFIG.moderatorRoleId)) permissionOverwrites.push({ id: CONFIG.moderatorRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] });
+    channel = await guild.channels.create({ name: 'invite-buyer-logs', type: ChannelType.GuildText, permissionOverwrites, reason: 'Private buyer conversion logs for invite competition' });
+  }
+  if (channel.permissionsFor(guild.roles.everyone)?.has(PermissionFlagsBits.ViewChannel)) {
+    // Fail closed instead of posting personal referral data in a public room.
+    throw new Error('invite-buyer-logs is public; make it staff-only before enabling conversion logs.');
+  }
+  tracking.buyerLogChannelId = channel.id;
+  saveState();
+  return channel;
+}
+
+async function logRejectedInvite(member, source) {
+  const tracking = ensureInviteTrackingState();
+  const key = source.id;
+  if (!source.invalidReason || tracking.rejectedInvites?.[key]) return;
+  const channel = await ensureInviteBuyerLogChannel(member.guild);
+  await channel.send(v2Payload({
+    title: `${customEmojiText('alert')} Referral Excluded`,
+    description: [
+      `**Joined:** <@${member.id}>`,
+      `**Inviter:** ${source.inviterId ? `<@${source.inviterId}>` : 'Unknown'}`,
+      `**Reason:** ${source.invalidReason}`,
+      `-# Not counted in /invitecomp. Staff should review suspected alts before rewards are paid.`,
+    ].join('\n'),
+  }));
+  tracking.rejectedInvites ||= {};
+  tracking.rejectedInvites[key] = Date.now();
+  saveState();
+}
+
+async function logInviteBuyerConversion(member) {
+  const source = latestInviteSourceFor(member.id);
+  if (!source?.inviterId || source.inviterId === member.id) return;
+  const tracking = ensureInviteTrackingState();
+  const key = `${member.id}:${source.id}`;
+  if (tracking.buyerConversions[key]) return;
+  const channel = await ensureInviteBuyerLogChannel(member.guild);
+  const isValid = source.eligible !== false && !source.invalidReason;
+  await channel.send(v2Payload({
+    title: `${customEmojiText('gift')} Referred Member Became a Buyer`,
+    description: [
+      `${customEmojiText('member')} **New buyer:** <@${member.id}> (\`${member.id}\`)`,
+      `${customEmojiText('mail')} **Invited by:** <@${source.inviterId}> (\`${source.inviterId}\`)`,
+      `**Invite code:** \`${source.code || 'Unknown'}\``,
+      `**Referral status:** ${isValid ? 'Eligible / review for double reward' : `Excluded — ${source.invalidReason || 'invalid referral'}`}`,
+      `**Buyer role:** <@&${CONFIG.buyerRoleId}>`,
+      `-# The buyer role is a conversion signal; payouts still require staff/payment verification.`,
+    ].join('\n'),
+  }));
+  tracking.buyerConversions[key] = { memberId: member.id, inviterId: source.inviterId, at: Date.now(), valid: isValid };
+  saveState();
 }
 
 function startStatusRotator() {
@@ -1509,6 +1896,9 @@ client.on('guildMemberAdd', async member => {
     registerMemberActivity('join', member.id);
     registerJoin(member);
     await queueInviteJoinDetection(member);
+    inviteMemberCache?.add(member.id);
+    inviteRecentPresenceEvents.set(member.id, { present: true, at: Date.now() });
+    scheduleInviteLeaderboardRefresh();
     const assessment = evaluateAltRisk(member);
     if (assessment.score >= 25) await sendAltRiskLog(member, assessment, assessment.score >= CONFIG.altAlertThreshold);
 
@@ -1520,9 +1910,12 @@ client.on('guildMemberAdd', async member => {
   }
 });
 
-client.on('guildMemberUpdate', async (_oldMember, newMember) => {
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
   if (newMember.guild.id !== CONFIG.guildId || newMember.user.bot) return;
   await autoGrantLinkBypassIfEligible(newMember).catch(error => console.error('[AUTOMOD] Link Bypass member sync failed:', error));
+  if (!oldMember.roles.cache.has(CONFIG.buyerRoleId) && newMember.roles.cache.has(CONFIG.buyerRoleId)) {
+    await logInviteBuyerConversion(newMember).catch(error => console.error('[INVITE BUYER LOGS] Cannot record buyer conversion:', error));
+  }
 });
 
 client.on('guildMemberRemove', member => {
@@ -1530,6 +1923,9 @@ client.on('guildMemberRemove', member => {
   try {
     registerMemberActivity('leave', member.id);
     markInviteJoinLeft(member.id);
+    inviteMemberCache?.delete(member.id);
+    inviteRecentPresenceEvents.set(member.id, { present: false, at: Date.now() });
+    scheduleInviteLeaderboardRefresh();
   } catch (error) {
     console.error('[ANALYTICS] Failed to record member leave:', error);
   }
@@ -1576,6 +1972,7 @@ client.on('interactionCreate', async interaction => {
       return;
     }
     if (interaction.isButton()) {
+      if (interaction.customId.startsWith('invcomp:')) return handleInviteCompetitionButton(interaction);
       if (interaction.customId.startsWith('dmpoll:')) return handleDmPollButton(interaction);
       if (interaction.customId.startsWith('tour:')) return handleTournamentButton(interaction);
       if (interaction.customId.startsWith('chatdrop:')) return handleChatDropButton(interaction);
@@ -1591,7 +1988,12 @@ client.on('interactionCreate', async interaction => {
       return;
     }
     if (!interaction.isChatInputCommand()) return;
-    if (!interaction.inGuild() || interaction.guildId !== CONFIG.guildId) return;
+    if (!interaction.inGuild()) {
+      if (interaction.commandName === 'invites') return handleInvites(interaction);
+      if (interaction.commandName === 'myinvite') return handleMyInvite(interaction);
+      return;
+    }
+    if (interaction.guildId !== CONFIG.guildId) return;
 
     switch (interaction.commandName) {
       case 'lockdown': return handleLockdown(interaction);
@@ -1654,11 +2056,14 @@ client.on('interactionCreate', async interaction => {
       case 'scamalert': return handleScamAlertCommand(interaction);
       case 'evidence': return handleEvidenceCommand(interaction);
       case 'invites': return handleInvites(interaction);
+      case 'myinvite': return handleMyInvite(interaction);
+      case 'invitecomp': return handleInviteCompetition(interaction);
       case 'invitelinks': return handleInviteLinks(interaction);
       case 'inviteleaderboard': return handleInviteLeaderboard(interaction);
       case 'invitedby': return handleInvitedBy(interaction);
       case 'invitehistory': return handleInviteHistory(interaction);
       case 'inviterefresh': return handleInviteRefresh(interaction);
+      case 'invitereview': return handleInviteReview(interaction);
       case 'dmpollcreate': return handleDmPollCreate(interaction);
       case 'dmquestion': return handleDmQuestion(interaction);
       case 'dmquestionremove': return handleDmQuestionRemove(interaction);
