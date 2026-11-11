@@ -235,6 +235,10 @@ let inviteMemberReconcilePromise = null;
 let inviteMemberCache = null;
 const inviteRecentPresenceEvents = new Map();
 const INVITE_COMP_PAGE_SIZE = 10;
+// One-time competition reset: starts the first time THIS version runs on the
+// existing persistent state. Prior referrals remain untouched in history.
+const INVITE_COMPETITION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
+const INVITE_COMPETITION_VERSION = 1;
 const INVITE_ACCOUNT_MIN_AGE_MS = 7 * 24 * 60 * 60_000;
 const INVITE_MEMBER_RECONCILE_MS = 15 * 60_000;
 // Discord exposes invite-use deltas, not real-person/alt identities. Account age,
@@ -966,8 +970,11 @@ client.once('ready', async () => {
     const count = await initializeInviteTracking(guild);
     console.log(`[INVITES] Tracking ${count} active invite link(s).`);
     await ensureInviteBuyerLogChannel(guild).catch(error => console.error('[INVITE BUYER LOGS] Auto channel setup failed:', error));
-    // Asynchronous full member scan to catch departures during downtime.
-    reconcileInviteMembership(guild).catch(error => console.error('[INVITE COMP] Initial member sync failed:', error));
+    // Finish the member scan before editing public boards. This removes
+    // inviters who have left, rather than displaying any stale old scores.
+    await reconcileInviteMembership(guild).catch(error => console.error('[INVITE COMP] Initial member sync failed:', error));
+    // Restore all existing public boards to page 1 immediately after restart.
+    await refreshPostedInviteLeaderboards().catch(error => console.error('[INVITE COMP] Initial public board sync failed:', error));
     setInterval(() => reconcileInviteMembership(guild).catch(error => console.error('[INVITE COMP] Periodic member sync failed:', error)), INVITE_MEMBER_RECONCILE_MS).unref();
     setInterval(() => refreshPostedInviteLeaderboards().catch(error => console.error('[INVITE COMP] Periodic live refresh failed:', error)), 2 * 60_000).unref();
   } catch (error) {
@@ -1049,6 +1056,19 @@ function ensureInviteTrackingState() {
   if (!state.inviteTracking.memberSources || typeof state.inviteTracking.memberSources !== 'object') state.inviteTracking.memberSources = {};
   if (!Array.isArray(state.inviteTracking.leaderboards)) state.inviteTracking.leaderboards = [];
   if (!state.inviteTracking.buyerConversions || typeof state.inviteTracking.buyerConversions !== 'object') state.inviteTracking.buyerConversions = {};
+  // Do not change this persisted start on subsequent deployments/restarts.
+  // Separating the window from joins preserves the ordinary lifetime tracker.
+  if (state.inviteTracking.competition?.version !== INVITE_COMPETITION_VERSION) {
+    const startedAt = Date.now();
+    state.inviteTracking.competition = {
+      version: INVITE_COMPETITION_VERSION,
+      startedAt,
+      endsAt: startedAt + INVITE_COMPETITION_DURATION_MS,
+      finalRankings: null,
+    };
+    saveState();
+    console.log(`[INVITE COMP] NEW 30-day competition started ${new Date(startedAt).toISOString()}; prior invites are excluded.`);
+  }
   return state.inviteTracking;
 }
 
@@ -1135,6 +1155,7 @@ function recordInviteJoin(member, source) {
 
   // Rejoining does not create a new invitation credit or allow a user to move
   // their credit to a different inviter after leaving and joining again.
+  const earliestKnownJoin = tracking.joins.find(j => j?.memberId === member.id);
   const original = tracking.joins.find(j => j?.memberId === member.id && j.inviterId);
   const ownerId = original?.inviterId || source.creatorId || null;
   const assessment = evaluateAltRisk(member);
@@ -1156,6 +1177,9 @@ function recordInviteJoin(member, source) {
     code: original?.code || source.code || null,
     channelId: original?.channelId || source.channelId || null,
     joinedAt: Date.now(),
+    // The first-ever join is authoritative. A pre-competition member cannot
+    // leave/rejoin during the competition to turn an old invite into a new one.
+    firstJoinedAt: Number(earliestKnownJoin?.firstJoinedAt || earliestKnownJoin?.joinedAt || Date.now()),
     leftAt: null,
     invalidReason,
     manualOverride: original?.manualOverride || null,
@@ -1277,24 +1301,57 @@ function queueInviteJoinDetection(member) {
   return inviteDetectionQueue;
 }
 
-function competitionRankings() {
+// The two ledgers share real, deduplicated join records but have DIFFERENT
+// display windows. This avoids deleting historical data when a new competition
+// starts and ensures no previous joins can be silently carried over.
+function inviteRankingsWithin(startAt = 0, endAt = Number.POSITIVE_INFINITY) {
   const tracking = ensureInviteTrackingState();
+  // The inviter AND invitee must both be confirmed current server members.
+  // Without an authoritative member scan, never show stale ex-member scores.
+  if (!inviteMemberCache) return [];
   const newestByInvitee = new Map();
+  const firstByInvitee = new Map();
   for (const join of tracking.joins) {
-    if (join?.memberId) newestByInvitee.set(join.memberId, join);
+    if (!join?.memberId) continue;
+    if (!firstByInvitee.has(join.memberId)) firstByInvitee.set(join.memberId, Number(join.firstJoinedAt || join.joinedAt || 0));
+    newestByInvitee.set(join.memberId, join);
   }
   const totals = new Map();
   for (const join of newestByInvitee.values()) {
     if (!join.inviterId || join.leftAt || join.eligible === false || join.invalidReason) continue;
-    if (inviteMemberCache && !inviteMemberCache.has(join.memberId)) continue;
+    if (!inviteMemberCache.has(join.memberId) || !inviteMemberCache.has(join.inviterId)) continue;
     if (join.inviterId === join.memberId) continue;
+    const firstJoinedAt = Number(firstByInvitee.get(join.memberId) || join.firstJoinedAt || join.joinedAt || 0);
+    if (firstJoinedAt < startAt || firstJoinedAt >= endAt) continue;
     const row = totals.get(join.inviterId) || { userId: join.inviterId, count: 0, username: join.inviterUsername || null };
     row.count++;
     totals.set(join.inviterId, row);
   }
   return [...totals.values()]
-    .filter(row => !inviteMemberCache || inviteMemberCache.has(row.userId))
     .sort((a, b) => b.count - a.count || a.userId.localeCompare(b.userId));
+}
+
+function competitionIsLive() {
+  const { startedAt, endsAt } = ensureInviteTrackingState().competition;
+  return Date.now() >= startedAt && Date.now() < endsAt;
+}
+
+function competitionRankings() {
+  const tracking = ensureInviteTrackingState();
+  const comp = tracking.competition;
+  if (Array.isArray(comp.finalRankings)) return comp.finalRankings;
+  const current = inviteRankingsWithin(comp.startedAt, comp.endsAt);
+  if (Date.now() >= comp.endsAt && inviteMemberCache) {
+    // Freeze standings at closure, leaving lifelong stats separately intact.
+    comp.finalRankings = current.map(row => ({ ...row }));
+    comp.finishedAt = Date.now();
+    saveState();
+  }
+  return current;
+}
+
+function normalInviteRankings() {
+  return inviteRankingsWithin();
 }
 
 function inviteStatsFor(userId) {
@@ -1303,13 +1360,15 @@ function inviteStatsFor(userId) {
   const joins = tracking.joins.filter(j => j?.inviterId === userId);
   const unique = new Map();
   for (const join of joins) unique.set(join.memberId, join);
-  const activeJoins = [...unique.values()].filter(j => !j.leftAt && (!inviteMemberCache || inviteMemberCache.has(j.memberId)));
+  const activeJoins = [...unique.values()].filter(j => !j.leftAt && inviteMemberCache?.has(j.memberId));
   return {
     links,
     activeLinks: links.filter(inv => inv.active),
     joins,
     activeJoins,
-    eligibleCount: competitionRankings().find(x => x.userId === userId)?.count || 0,
+    // Expose only the active contest until it ends; original normal numbers
+    // remain tracked in joins, but are not displayed by /invites meanwhile.
+    eligibleCount: (competitionIsLive() ? competitionRankings() : normalInviteRankings()).find(x => x.userId === userId)?.count || 0,
     left: [...unique.values()].filter(j => j.leftAt).length,
   };
 }
@@ -1346,12 +1405,14 @@ function inviteUserLabel(user, fallbackId, fallbackUsername = null) {
 }
 
 async function handleInvites(interaction) {
+  await ensureInviteMemberCacheReady();
   const isDm = !interaction.inGuild();
   const target = interaction.options.getUser('user') || interaction.user;
   if (isDm && target.id !== interaction.user.id) return fail(interaction, 'Your Invites', 'In DMs you can only check your own invitations.');
   await interaction.reply(v2Payload({ title: 'Bloxburg Store | Invites', description: 'Loading your current invite stats...' })); // Public in server, visible in DMs.
   const stats = inviteStatsFor(target.id);
-  const ranks = competitionRankings();
+  const contestOpen = competitionIsLive();
+  const ranks = contestOpen ? competitionRankings() : normalInviteRankings();
   const ownRankIndex = ranks.findIndex(row => row.userId === target.id);
   const ownRank = ownRankIndex < 0 ? 'Unranked' : `#${ownRankIndex + 1}`;
   const goals = [3, 2, 1].map(rank => {
@@ -1363,14 +1424,15 @@ async function handleInvites(interaction) {
   const personal = target.id === interaction.user.id ? await getOrCreatePersonalInvite(target.id).catch(() => null) : null;
   const linkText = personal ? `\n${customEmojiText('mail')} **Your personal link**\nhttps://discord.gg/${personal.code}` : '';
   const description = [
-    `${customEmojiText('member')} **${escapeMassMentions(target.username)}'s Invite Stats**`,
-    `**${stats.eligibleCount}** valid invites currently in the server • **${ownRank}** overall`,
+    `${customEmojiText('member')} **${escapeMassMentions(target.username)}'s ${contestOpen ? 'Competition' : 'Lifetime'} Invite Stats**`,
+    `**${stats.eligibleCount}** valid ${contestOpen ? 'competition' : 'total'} invites currently in the server • **${ownRank}** overall`,
+    contestOpen ? `**30-day contest ends:** <t:${Math.floor(ensureInviteTrackingState().competition.endsAt / 1000)}:F> (<t:${Math.floor(ensureInviteTrackingState().competition.endsAt / 1000)}:R>)` : '**The 30-day competition has ended. Normal lifetime statistics are now visible.**',
     '',
     `${customEmojiText('giveaway')} **Distance to the podium**`,
     goals.join('\n'),
     target.id === interaction.user.id ? linkText : '',
     '',
-    '-# Only valid, tracked invites from members still in the server count. Suspicious or duplicate referrals do not count.',
+    '-# Only valid, tracked invites from members still in the server count. Suspicious or duplicate referrals do not count. Previous joins never count toward the contest.',
   ].filter(x => x !== null).join('\n');
   return interaction.editReply(v2Edit({ title: 'Bloxburg Store | Invites', description }));
 }
@@ -1393,20 +1455,28 @@ async function handleInviteLinks(interaction) {
     return interaction.reply(v2Payload({ title: 'Invite Links', description: `${inviteUserLabel(target, target.id)} has no invite links saved by the tracker.` }));
   }
   const sorted = [...stats.links].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const hideLifetimeUses = competitionIsLive();
   const lines = sorted.slice(0, 15).map((inv, index) => {
     const status = inv.active ? 'Active' : 'Inactive';
     const created = inv.createdAt ? `<t:${Math.floor(inv.createdAt / 1000)}:d>` : 'Unknown';
     const expiry = inv.expiresAt ? ` • expires <t:${Math.floor(inv.expiresAt / 1000)}:R>` : '';
-    return `**${index + 1}. discord.gg/${inv.code}**\nUses: **${Number(inv.uses || 0)}** • ${status} • created ${created}${expiry}`;
+    return `**${index + 1}. discord.gg/${inv.code}**\n${hideLifetimeUses ? 'Lifetime uses hidden until competition ends' : `Uses: **${Number(inv.uses || 0)}**`} • ${status} • created ${created}${expiry}`;
   });
   if (sorted.length > 15) lines.push(`\n-# Showing 15 of ${sorted.length} saved links.`);
   return interaction.reply(v2Payload({ title: `Invite Links - ${target.username}`, description: lines.join('\n\n') }));
 }
 
 async function handleInviteLeaderboard(interaction) {
-  // Old command remains available, but now follows the competition's accurate
-  // current-member scoring instead of counting people who left.
-  return handleInviteCompetition(interaction);
+  // Prior to close, all public leaderboard commands show competition-only data.
+  // After close, this legacy command restores normal lifetime rankings.
+  if (competitionIsLive()) return handleInviteCompetition(interaction);
+  await ensureInviteMemberCacheReady();
+  const ranks = normalInviteRankings();
+  const lines = ranks.slice(0, 20).map((row, i) => `**#${i + 1}** <@${row.userId}> — **${row.count}** invites`);
+  return interaction.reply(v2Payload({
+    title: 'Bloxburg Store | Lifetime Invite Leaderboard',
+    description: lines.length ? lines.join('\n\n') : 'No eligible lifetime invites were found.',
+  }));
 }
 
 async function handleInvitedBy(interaction) {
@@ -1440,7 +1510,13 @@ async function handleInviteHistory(interaction) {
   }
   const stats = inviteStatsFor(target.id);
   if (!stats.joins.length) return interaction.reply(v2Payload({ title: 'Invite History', description: 'No tracked joins were found for this inviter.', ephemeral: true }));
-  const recent = [...stats.joins].sort((a, b) => Number(b.joinedAt || 0) - Number(a.joinedAt || 0)).slice(0, 20);
+  // Members may inspect current competition referrals during the 30-day
+  // period, but historical/lifetime totals return after the contest finishes.
+  const visibleJoins = competitionIsLive()
+    ? stats.joins.filter(j => Number(j.firstJoinedAt || j.joinedAt || 0) >= ensureInviteTrackingState().competition.startedAt)
+    : stats.joins;
+  if (!visibleJoins.length) return interaction.reply(v2Payload({ title: 'Invite History', description: 'No referrals have been recorded for this 30-day competition yet.', ephemeral: true }));
+  const recent = [...visibleJoins].sort((a, b) => Number(b.joinedAt || 0) - Number(a.joinedAt || 0)).slice(0, 20);
   const lines = [];
   for (let i = 0; i < recent.length; i++) {
     const join = recent[i];
@@ -1450,7 +1526,7 @@ async function handleInviteHistory(interaction) {
     const joined = join.joinedAt ? `<t:${Math.floor(join.joinedAt / 1000)}:R>` : 'Unknown';
     lines.push(`**${i + 1}. ${escapeMassMentions(name)}** (\`${join.memberId}\`)\nvia \`${join.code || 'unknown'}\` • joined ${joined} • ${status}`);
   }
-  if (stats.joins.length > 20) lines.push(`\n-# Showing the 20 most recent of ${stats.joins.length} tracked joins.`);
+  if (visibleJoins.length > 20) lines.push(`\n-# Showing the 20 most recent of ${visibleJoins.length} tracked joins.`);
   return interaction.reply(v2Payload({ title: `Invite History - ${target.username}`, description: lines.join('\n\n'), ephemeral: true }));
 }
 
@@ -1491,14 +1567,18 @@ async function handleInviteReview(interaction) {
 
 // ========= BLOXBURG STORE INVITE COMPETITION =========
 function inviteCompSignature(page = 0) {
-  return `${page}|${competitionRankings().map(row => `${row.userId}:${row.count}`).join(',')}`;
+  const comp = ensureInviteTrackingState().competition;
+  return `${page}|${comp.version}:${comp.startedAt}:${competitionIsLive() ? 'live' : 'ended'}|${competitionRankings().map(row => `${row.userId}:${row.count}`).join(',')}`;
 }
 
 function inviteCompPageCount(ranks) {
   return Math.max(1, Math.ceil(ranks.length / INVITE_COMP_PAGE_SIZE));
 }
 
-function inviteCompPayload(pageNumber = 0, isEdit = false) {
+// The channel leaderboard is always page 1. Navigation opens each member's own
+// ephemeral copy. Private copies carry their current page in the button ID so
+// multiple viewers never share or overwrite each other's navigation state.
+function inviteCompPayload(pageNumber = 0, isEdit = false, privateMode = false) {
   const ranks = competitionRankings();
   const pages = inviteCompPageCount(ranks);
   const page = Math.max(0, Math.min(pageNumber, pages - 1));
@@ -1510,23 +1590,24 @@ function inviteCompPayload(pageNumber = 0, isEdit = false) {
     return `${medal} **#${place}** <@${row.userId}> — **${row.count}** invite${row.count === 1 ? '' : 's'}`;
   });
   const description = [
-    `${customEmojiText('giveaway')} **LIVE INVITE LEADERBOARD**`,
+    `${customEmojiText('giveaway')} **${competitionIsLive() ? 'LIVE INVITE LEADERBOARD' : 'FINAL COMPETITION LEADERBOARD'}**`,
     '',
     lines.length ? lines.join('\n\n') : '*No eligible tracked invites yet. Share your personal link to enter!*',
     '',
-    `-# Page ${page + 1}/${pages} • Active members only • Refreshes when members join or leave`,
+    `-# Page ${page + 1}/${pages} • ${competitionIsLive() ? `30-day contest ends <t:${Math.floor(ensureInviteTrackingState().competition.endsAt / 1000)}:R>` : 'Competition finished'} • ${privateMode ? 'Private view — only you can see this' : 'Live updates • Buttons open private pages'}`,
   ].join('\n');
   const container = new ContainerBuilder()
     .setAccentColor(0x3B82F6)
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(`# ${customEmojiText('gift')} Bloxburg Store | Invite Competition\n${description}`));
+  const buttonId = action => privateMode ? `invcomp:private:${action}:${page}` : `invcomp:${action}`;
   const buttons = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('invcomp:first').setLabel('First').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
-    new ButtonBuilder().setCustomId('invcomp:prev').setLabel('Previous').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
-    new ButtonBuilder().setCustomId('invcomp:next').setLabel('Next').setStyle(ButtonStyle.Primary).setDisabled(page >= pages - 1),
-    new ButtonBuilder().setCustomId('invcomp:last').setLabel('Last').setStyle(ButtonStyle.Secondary).setDisabled(page >= pages - 1),
+    new ButtonBuilder().setCustomId(buttonId('first')).setLabel('First').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+    new ButtonBuilder().setCustomId(buttonId('prev')).setLabel('Previous').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+    new ButtonBuilder().setCustomId(buttonId('next')).setLabel('Next').setStyle(ButtonStyle.Primary).setDisabled(page >= pages - 1),
+    new ButtonBuilder().setCustomId(buttonId('last')).setLabel('Last').setStyle(ButtonStyle.Secondary).setDisabled(page >= pages - 1),
   );
   return { page, payload: {
-    ...(isEdit ? {} : { flags: MessageFlags.IsComponentsV2 }),
+    ...(isEdit ? {} : { flags: MessageFlags.IsComponentsV2 | (privateMode ? MessageFlags.Ephemeral : 0) }),
     components: [container, buttons],
     allowedMentions: { parse: [] },
   } };
@@ -1534,6 +1615,7 @@ function inviteCompPayload(pageNumber = 0, isEdit = false) {
 
 async function handleInviteCompetition(interaction) {
   if (!interaction.inGuild() || interaction.guildId !== CONFIG.guildId) return;
+  await ensureInviteMemberCacheReady();
   // Public, V2-marked from the *initial* reply (Discord requires this flag).
   const { page, payload } = inviteCompPayload(0, false);
   await interaction.reply(payload);
@@ -1548,16 +1630,34 @@ async function handleInviteCompetition(interaction) {
 
 async function handleInviteCompetitionButton(interaction) {
   if (interaction.guildId !== CONFIG.guildId) return;
-  const tracking = ensureInviteTrackingState();
-  const board = tracking.leaderboards.find(b => b.messageId === interaction.message.id);
-  if (!board) return interaction.reply({ content: 'This leaderboard is no longer being tracked. Run /invitecomp again.', flags: MessageFlags.Ephemeral });
+  await ensureInviteMemberCacheReady();
+  const parts = interaction.customId.split(':');
+  const privateMode = parts[1] === 'private';
+  const action = privateMode ? parts[2] : parts[1];
+  if (!['first', 'prev', 'next', 'last'].includes(action)) return;
+
+  // Only the original, public /invitecomp message needs to be persisted.
+  // Every later navigation button belongs to the viewer's ephemeral copy.
+  if (!privateMode) {
+    const tracking = ensureInviteTrackingState();
+    const board = tracking.leaderboards.find(b => b.messageId === interaction.message.id);
+    if (!board) return interaction.reply({ content: 'This leaderboard is no longer being tracked. Run /invitecomp again.', flags: MessageFlags.Ephemeral });
+  }
+
   const pages = inviteCompPageCount(competitionRankings());
-  const action = interaction.customId.split(':')[1];
-  const page = action === 'first' ? 0 : action === 'last' ? pages - 1 : Math.max(0, Math.min(pages - 1, (board.page || 0) + (action === 'next' ? 1 : -1)));
-  board.page = page;
-  board.lastSignature = inviteCompSignature(page);
-  saveState();
-  return interaction.update(inviteCompPayload(page, true).payload);
+  const currentPage = privateMode && /^\d+$/.test(parts[3] || '')
+    ? Math.min(pages - 1, Number(parts[3])) : 0;
+  const page = action === 'first' ? 0
+    : action === 'last' ? pages - 1
+    : Math.max(0, Math.min(pages - 1, currentPage + (action === 'next' ? 1 : -1)));
+
+  if (privateMode) {
+    // Update ONLY this ephemeral message, never the channel's leaderboard.
+    return interaction.update(inviteCompPayload(page, true, true).payload);
+  }
+  // The first click on the public message creates a separate, private V2
+  // leaderboard for the clicking member. Other members see no change.
+  return interaction.reply(inviteCompPayload(page, false, true).payload);
 }
 
 function scheduleInviteLeaderboardRefresh() {
@@ -1571,12 +1671,15 @@ function scheduleInviteLeaderboardRefresh() {
 
 async function refreshPostedInviteLeaderboards() {
   const tracking = ensureInviteTrackingState();
+  if (!inviteMemberCache) return; // Never publish unverified historical counts.
   const boards = [...tracking.leaderboards];
   let dirty = false;
   for (const board of boards) {
-    const { page, payload } = inviteCompPayload(board.page || 0, true);
+    const { page, payload } = inviteCompPayload(0, true);
     const signature = inviteCompSignature(page);
-    if (board.lastSignature === signature) continue;
+    // Repair any previously posted leaderboard that was left on a non-first
+    // page before this update, even if the invite counts have not changed.
+    if ((board.page || 0) === 0 && board.lastSignature === signature) continue;
     const channel = await client.channels.fetch(board.channelId).catch(() => null);
     if (!channel?.isTextBased?.()) continue;
     try {
@@ -1595,6 +1698,18 @@ async function refreshPostedInviteLeaderboards() {
     }
   }
   if (dirty) saveState();
+}
+
+async function ensureInviteMemberCacheReady() {
+  if (inviteMemberCache) return true;
+  const guild = client.guilds.cache.get(CONFIG.guildId) || await client.guilds.fetch(CONFIG.guildId);
+  try {
+    await reconcileInviteMembership(guild);
+    return Boolean(inviteMemberCache);
+  } catch (error) {
+    console.warn('[INVITE COMP] Unable to verify current members:', error?.message || error);
+    return false;
+  }
 }
 
 async function reconcileInviteMembership(guild) {
