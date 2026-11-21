@@ -972,5 +972,5 @@ export function setupAiAssistant({ client, guildId, getState, persist, callModel
     }finally{reportRunning=false;}
   }
   function startSchedules() {void checkSchedules().catch(e=>console.error('[AI REPORT] Schedule check:',logError(e)));setInterval(()=>void checkSchedules().catch(e=>console.error('[AI REPORT] Schedule check:',logError(e))),60_000).unref?.();}
-  return { handleMessage, handleSupportMessage, handleSupportButton, handleTicketActionMessage:ticketActions.handleMessage, handleCommand, getBuildInstructions, startSchedules, isAdminId };
+  return { handleMessage, handleSupportMessage, handleSupportButton, handleTicketActionMessage:ticketActions.handleMessage, getTicketStatus: async (channelId) => (await ticketActions.api(channelId)).ticket, handleCommand, getBuildInstructions, startSchedules, isAdminId };
 }

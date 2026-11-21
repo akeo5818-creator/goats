@@ -240,6 +240,7 @@ const buildAi = setupBuildAi({
   callModel: requestAiChatCompletion, apiConfigured: () => Boolean(CONFIG.aiApiKey),
   ticketBotId: CONFIG.ticketBotId, staffRoleIds: CONFIG.buildAiStaffRoleIds, ticketStaffRoleId: CONFIG.aiTicketStaffRoleId,
   getAssistantInstructions: (message) => aiAssistant.getBuildInstructions(message),
+  getTicketStatus: (channelId) => aiAssistant.getTicketStatus(channelId),
 });
 
 const aiAssistant = setupAiAssistant({

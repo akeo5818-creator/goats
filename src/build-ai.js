@@ -73,6 +73,31 @@ function isBuildTicket(channel) {
   return channel?.type === ChannelType.GuildText
     && (/^website-build-/i.test(channel.name || '') || /^(build|builds)-/i.test(channel.name || ''));
 }
+// Paid Build Scheduling cards are posted by the *Ticket Bot*, not by the
+// customer. Only that trusted author may lock an intake session this way.
+function isTrustedPaidBuildCard(message, ticketBotId) {
+  if (!ticketBotId || String(message?.author?.id) !== String(ticketBotId) || !isBuildTicket(message?.channel)) return false;
+  const embeds = (message.embeds || []).map(embed => [
+    embed.title, embed.description,
+    ...(embed.fields || []).flatMap(field => [field.name, field.value]),
+  ].filter(Boolean).join('\n'));
+  const body = [message.content, messageCardText(message), ...embeds].filter(Boolean).join('\n');
+  // In this store a Build Scheduling panel is only created after payment is
+  // confirmed. Do not treat arbitrary Build Request/quote cards as paid.
+  return /Build Scheduling/i.test(body) && /\bPaid\b/i.test(body);
+}
+
+function isFulfillmentState(ticket) {
+  if (!ticket || ticket.status !== 'open') return true; // Never intake a closed or unknown ticket.
+  if (ticket.paid === true || String(ticket.paymentStatus || '').toLowerCase() === 'verified') return true;
+  const progress = String(ticket.orderStatus || '').toLowerCase();
+  return /(?:paid|fulfill|fulfil|in.progress|underway|building|completed|delivered)/.test(progress);
+}
+
+// Staff can stop outdated intake without altering any order/payment state.
+function isStaffFulfillmentNotice(text) {
+  return /\b(?:already\s+(?:started|paid|working\s+on)|(?:build|order|job)\s+(?:has\s+)?(?:started|is\s+(?:paid|underway|in\s+progress|being\s+built))|(?:stop|disable|turn\s+off|pause)\s+(?:the\s+)?(?:build\s+)?ai)\b/i.test(String(text || ''));
+}
 function isWebsiteBuildTicket(channel) {
   return /^website-build-/i.test(channel?.name || '')
     && /^Website ticket\s+/i.test(channel.topic || '');
@@ -114,7 +139,7 @@ function inputFromMessage(message, ticketBotId) {
   return { text: [text, attachments.length ? `Reference attachments:\n${attachments.join('\n')}` : ''].filter(Boolean).join('\n\n'), label: short(message.member?.displayName || message.author?.username, 75), imageUrls: [...(message.attachments?.values?.() || [])].filter(a => /^image\/(png|jpeg|webp|gif)$/i.test(a.contentType || '')).slice(0, 2).map(a => a.url) };
 }
 
-export function setupBuildAi({ client, guildId, getState, persist, callModel, apiConfigured, ticketBotId, staffRoleIds, ticketStaffRoleId = "", getAssistantInstructions = () => "" }) {
+export function setupBuildAi({ client, guildId, getState, persist, callModel, apiConfigured, ticketBotId, staffRoleIds, ticketStaffRoleId = "", getAssistantInstructions = () => "", getTicketStatus = null }) {
   const queues = new Map();
   const staffRoles = (staffRoleIds || []).map(String).filter(Boolean);
   function data() {
@@ -126,6 +151,54 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
     s.questions = normalizeQuestions(s.questions);
     return s;
   }
+  function lockFulfillment(session, channelId, evidence) {
+    if (!session.fulfillmentLocked) console.log(`[BUILD AI] Intake disabled in ${channelId}: ${evidence}`);
+    session.fulfillmentLocked = true;
+    session.paused = true;
+    session.pauseReason = 'paid_or_fulfillment';
+    session.handoffPending = false;
+    session.updatedAt = Date.now();
+    persist();
+  }
+  async function checkAuthoritativeStatus(channel, session, { quiet = false } = {}) {
+    if (session.fulfillmentLocked) return false;
+    if (typeof getTicketStatus !== 'function') {
+      // Compatibility with installations that have not configured the ticket
+      // action bridge. The message-history guard below still checks paid cards.
+      return true;
+    }
+    try {
+      const ticket = await getTicketStatus(channel.id);
+      if (isFulfillmentState(ticket)) {
+        lockFulfillment(session, channel.id, 'verified ticket status / payment');
+        return false;
+      }
+      return true;
+    } catch (error) {
+      // Fail closed: never interrupt paid fulfillment because the Ticket Bot
+      // status endpoint is temporarily offline or misconfigured.
+      if (!quiet) console.warn(`[BUILD AI] Could not verify unpaid status in ${channel.id}; suppressing intake:`, error?.message || error);
+      return false;
+    }
+  }
+  async function checkRecentPaidCard(channel, session, ticketBotId) {
+    if (session.fulfillmentLocked) return false;
+    // The authoritative API is checked every time; avoid fetching 100 Discord
+    // messages again on every customer reply. Fresh cards are handled live.
+    if (Date.now() - Number(session.lastPaidCardScanAt || 0) < 60_000) return true;
+    try {
+      const recent = await channel.messages.fetch({ limit: 100 });
+      if ([...recent.values()].some(m => isTrustedPaidBuildCard(m, ticketBotId))) {
+        lockFulfillment(session, channel.id, 'existing paid Build Scheduling card');
+        return false;
+      }
+      session.lastPaidCardScanAt = Date.now();
+      persist();
+    } catch (error) {
+      console.warn(`[BUILD AI] Could not inspect Build Scheduling cards in ${channel.id}:`, error?.message || error);
+    }
+    return true;
+  }
   function enqueue(channelId, job) {
     const old = queues.get(channelId) || Promise.resolve();
     const current = old.catch(() => {}).then(job);
@@ -135,14 +208,33 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
   }
   async function handleMessage(message) {
     if (message.guildId !== guildId || !isBuildTicket(message.channel)) return false;
-    // Build channels are handled *only* by this system, not generic /aichat.
+    // Build channels are handled *only* by this system, not generic chat AI.
     if (message.author?.id === client.user?.id) return true;
-    const source = inputFromMessage(message, ticketBotId);
-    if (!source) return true;
-    if (!message.author?.bot && staffMember(message.member, staffRoles) && !isTicketParticipant(message)) return true;
     const cfg = data();
     const session = sessionFor(cfg, message.channelId);
-    if (session.paused || session.handoffPending || session.seenIds.includes(message.id)) return true;
+    // The Ticket Bot sends or bumps this card immediately after paid Build
+    // scheduling begins. Lock BEFORE considering any model-generated reply.
+    if (isTrustedPaidBuildCard(message, ticketBotId)) {
+      lockFulfillment(session, message.channelId, 'new paid Build Scheduling card');
+      return true;
+    }
+    const source = inputFromMessage(message, ticketBotId);
+    if (!source) return true;
+    const staff = !message.author?.bot && staffMember(message.member, staffRoles);
+    if (staff && isStaffFulfillmentNotice(source.text)) {
+      lockFulfillment(session, message.channelId, 'staff confirmed build already started or requested AI stop');
+      return true;
+    }
+    // Real staff who are not the ticket customer should not trigger intake.
+    if (staff && !isTicketParticipant(message)) return true;
+    if (session.paused || session.fulfillmentLocked || session.handoffPending || session.seenIds.includes(message.id)) return true;
+    // Always verify with the Ticket Bot's live records. A paid order can have
+    // a scheduling card far above Discord's most recent few messages.
+    if (!await checkAuthoritativeStatus(message.channel, session)) return true;
+    // Also guard older/website scheduling cards that may not be reflected by
+    // the API yet. On cold start, use the recent card history before replying.
+    if (!await checkRecentPaidCard(message.channel, session, ticketBotId)) return true;
+    if (session.paused || session.fulfillmentLocked || session.handoffPending || session.seenIds.includes(message.id)) return true;
     session.seenIds.push(message.id);
     session.seenIds = session.seenIds.slice(-70);
     session.lastSourceId = message.id;
@@ -181,7 +273,8 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
 
     void enqueue(message.channelId, async () => {
       const current = sessionFor(data(), message.channelId);
-      if (current.paused || current.handoffPending || current.lastSourceId !== message.id || current.complete || !data().enabled) return;
+      if (current.paused || current.fulfillmentLocked || current.handoffPending || current.lastSourceId !== message.id || current.complete || !data().enabled) return;
+      if (!await checkAuthoritativeStatus(message.channel, current, { quiet: true })) return;
       const instructions = [
         'You are Bloxy, the Bloxburg Store Build-ticket intake assistant. You are an AI, not a staff member.',
         getAssistantInstructions(message),
@@ -216,14 +309,18 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
       } catch (err) {
         console.error(`[BUILD AI] Response failed for ${message.channelId}:`, err?.message || err);
         const fresh = sessionFor(data(), message.channelId);
-        if (fresh.lastSourceId === message.id) {
+        if (fresh.lastSourceId === message.id && !fresh.fulfillmentLocked && !fresh.paused) {
           await notifyTicketAiUnavailable({ channel: message.channel, session: fresh, persist });
         }
         return; // Never post an unverified answer to the website.
       }
       // Staff may pause the AI while an API call is still in progress.
       const fresh = sessionFor(data(), message.channelId);
-      if (!data().enabled || fresh.paused || fresh.handoffPending || fresh.lastSourceId !== message.id || fresh.complete) return;
+      if (!data().enabled || fresh.paused || fresh.fulfillmentLocked || fresh.handoffPending || fresh.lastSourceId !== message.id || fresh.complete) return;
+      // The payment may have been verified while the model was generating.
+      // Re-read the authoritative status immediately before any Discord post.
+      if (!await checkAuthoritativeStatus(message.channel, fresh, { quiet: true })) return;
+      if (fresh.fulfillmentLocked || fresh.paused || fresh.lastSourceId !== message.id) return;
       const reply = short(result?.reply, 1800).replace(/@everyone/gi, '@ everyone').replace(/@here/gi, '@ here');
       if (!reply) return;
       const stage = ['ask', 'review', 'complete'].includes(result?.stage) ? result.stage : 'ask';
@@ -277,9 +374,22 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
     const sub = interaction.options.getSubcommand(true);
     const inTicket = isBuildTicket(interaction.channel);
     if (['pause', 'resume'].includes(sub) && !inTicket) return interaction.reply({ content: 'Run this command inside a Build ticket.', flags: MessageFlags.Ephemeral });
+    // Staff commands must not accidentally reactivate intake after payment.
+    if (inTicket && ['resume', 'status'].includes(sub)) {
+      const current = sessionFor(cfg, interaction.channelId);
+      const canIntake = await checkAuthoritativeStatus(interaction.channel, current, { quiet: sub === 'status' });
+      if (sub === 'resume' && !canIntake) {
+        return interaction.reply({ content: current.fulfillmentLocked
+          ? 'Billy stays disabled here because this Build is paid or fulfillment has begun.'
+          : 'I could not verify that this Build is unpaid. Keeping Billy off until the Ticket Bot status API is available.', flags: MessageFlags.Ephemeral });
+      }
+    }
     let text;
     if (sub === 'pause' || sub === 'resume') {
       const s = sessionFor(cfg, interaction.channelId);
+      if (sub === 'resume' && s.fulfillmentLocked) {
+        return interaction.reply({ content: 'Billy stays disabled here because this Build was marked paid or fulfillment already started. The Ticket Bot and assigned fulfiller manage this ticket.', flags: MessageFlags.Ephemeral });
+      }
       s.paused = sub === 'pause';
       if (sub === 'resume') { s.complete = false; s.escalated = false; s.handoffPending = false; s.stage = 'ask'; }
       s.updatedAt = Date.now();
@@ -287,7 +397,7 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
       text = `Build AI ${s.paused ? 'paused' : 'resumed'} in this ticket.${s.paused ? ' Staff can respond without interference.' : ' It will reply when the customer next messages.'}`;
     } else if (sub === 'status') {
       const s = inTicket ? sessionFor(cfg, interaction.channelId) : null;
-      text = `Global: **${cfg.enabled ? 'enabled' : 'disabled'}**\nAPI key: **${apiConfigured() ? 'configured' : 'missing'}**\nTicket: **${s ? (s.paused ? 'staff takeover / paused' : s.complete ? 'summary complete' : 'automatic') : 'not a Build ticket'}**\nConfigured questions: **${cfg.questions.length}**`;
+      text = `Global: **${cfg.enabled ? 'enabled' : 'disabled'}**\nAPI key: **${apiConfigured() ? 'configured' : 'missing'}**\nTicket: **${s ? (s.fulfillmentLocked ? 'paid / fulfillment — AI disabled' : s.paused ? 'staff takeover / paused' : s.complete ? 'summary complete' : 'automatic') : 'not a Build ticket'}**\nConfigured questions: **${cfg.questions.length}**`;
     } else if (sub === 'questions') {
       text = cfg.questions.map((q, i) => `${i + 1}. ${q}`).join('\n').slice(0, 1900);
     } else if (sub === 'setquestions') {
