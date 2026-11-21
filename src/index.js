@@ -64,6 +64,8 @@ const CONFIG = {
   pollResultsChannelId: process.env.POLL_RESULTS_CHANNEL_ID || null,
   adminAlertRoleId: process.env.ADMIN_ALERT_ROLE_ID || null,
   moderatorRoleId: process.env.MODERATOR_ROLE_ID || '1543902943009312870',
+  aiModeratorRoleId: process.env.AI_MODERATOR_ROLE_ID || process.env.MODERATOR_ROLE_ID || '1543902943009312870',
+  aiTicketStaffRoleId: process.env.AI_TICKET_STAFF_ROLE_ID || process.env.TICKET_STAFF_ROLE_ID || '1537689864827445282',
   tournamentCustomerRoleIds: String(process.env.TOURNAMENT_CUSTOMER_ROLE_IDS || '1542046269290315797')
     .split(',').map(id => id.trim()).filter(Boolean),
   aiApiKey: String(process.env.OPENAI_API_KEY || '').trim(),
@@ -236,7 +238,7 @@ const buildAi = setupBuildAi({
   client, guildId: CONFIG.guildId,
   getState: () => state, persist: saveState,
   callModel: requestAiChatCompletion, apiConfigured: () => Boolean(CONFIG.aiApiKey),
-  ticketBotId: CONFIG.ticketBotId, staffRoleIds: CONFIG.buildAiStaffRoleIds,
+  ticketBotId: CONFIG.ticketBotId, staffRoleIds: CONFIG.buildAiStaffRoleIds, ticketStaffRoleId: CONFIG.aiTicketStaffRoleId,
   getAssistantInstructions: () => aiAssistant.getBuildInstructions(),
 });
 
@@ -245,6 +247,7 @@ const aiAssistant = setupAiAssistant({
   callModel: requestAiChatCompletion, apiConfigured: () => Boolean(CONFIG.aiApiKey),
   adminIds: String(process.env.AI_ADMIN_USER_IDS || '').split(',').map(x => x.trim()).filter(Boolean),
   ticketBotId: CONFIG.ticketBotId, staffRoleIds: CONFIG.buildAiStaffRoleIds,
+  moderatorRoleId: CONFIG.aiModeratorRoleId, ticketStaffRoleId: CONFIG.aiTicketStaffRoleId,
   metricsUrl: String(process.env.STORE_SALES_API_URL || '').trim(),
   metricsSecret: String(process.env.STORE_AI_REPORT_SECRET || '').trim(), modelName: CONFIG.aiModel,
 });

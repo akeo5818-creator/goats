@@ -1,4 +1,5 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, MessageFlags, PermissionFlagsBits, SlashCommandBuilder } from 'discord.js';
+import { ChannelType, MessageFlags, PermissionFlagsBits, SlashCommandBuilder } from 'discord.js';
+import { handoffToHuman, isTicketParticipant, wantsHumanStaff, notifyTicketAiUnavailable } from './ticket-ai-utils.js';
 
 // Dedicated, independently configurable Build-ticket assistant. The Store ticket
 // bot still owns ticket creation, payment, closing and the website bridge.
@@ -14,6 +15,7 @@ const DEFAULT_QUESTIONS = [
 const MAX_TURNS = 50;
 const MAX_QUESTIONS = 24;
 const MAX_TEXT = 3300;
+const INSTANCE_STARTED_AT = Date.now();
 const RESULT_SCHEMA = {
   type: 'object',
   properties: {
@@ -83,6 +85,7 @@ function sessionFor(state, channelId) {
   const s = state.channels[id];
   if (!Array.isArray(s.turns)) s.turns = [];
   if (!Array.isArray(s.seenIds)) s.seenIds = [];
+  if (s.handoffPending && s.updatedAt < INSTANCE_STARTED_AT) s.handoffPending = false;
   return s;
 }
 function staffMember(member, roleIds) {
@@ -90,12 +93,6 @@ function staffMember(member, roleIds) {
   if (member.permissions?.has(PermissionFlagsBits.Administrator)
     || member.permissions?.has(PermissionFlagsBits.ManageChannels)) return true;
   return roleIds.some(id => member.roles?.cache?.has(id));
-}
-function pauseButton(channelId) {
-  return new ActionRowBuilder().addComponents(new ButtonBuilder()
-    .setCustomId(`buildai:pause:${channelId}`)
-    .setLabel('Staff Takeover · Pause AI')
-    .setStyle(ButtonStyle.Secondary));
 }
 function inputFromMessage(message, ticketBotId) {
   if (message.author?.bot) {
@@ -117,7 +114,7 @@ function inputFromMessage(message, ticketBotId) {
   return { text: [text, attachments.length ? `Reference attachments:\n${attachments.join('\n')}` : ''].filter(Boolean).join('\n\n'), label: short(message.member?.displayName || message.author?.username, 75), imageUrls: [...(message.attachments?.values?.() || [])].filter(a => /^image\/(png|jpeg|webp|gif)$/i.test(a.contentType || '')).slice(0, 2).map(a => a.url) };
 }
 
-export function setupBuildAi({ client, guildId, getState, persist, callModel, apiConfigured, ticketBotId, staffRoleIds, getAssistantInstructions = () => "" }) {
+export function setupBuildAi({ client, guildId, getState, persist, callModel, apiConfigured, ticketBotId, staffRoleIds, ticketStaffRoleId = "", getAssistantInstructions = () => "" }) {
   const queues = new Map();
   const staffRoles = (staffRoleIds || []).map(String).filter(Boolean);
   function data() {
@@ -142,13 +139,28 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
     if (message.author?.id === client.user?.id) return true;
     const source = inputFromMessage(message, ticketBotId);
     if (!source) return true;
-    if (!message.author?.bot && staffMember(message.member, staffRoles)) return true;
+    if (!message.author?.bot && staffMember(message.member, staffRoles) && !isTicketParticipant(message)) return true;
     const cfg = data();
-    if (!cfg.enabled || !apiConfigured()) return true;
     const session = sessionFor(cfg, message.channelId);
-    if (session.paused || session.complete || session.seenIds.includes(message.id)) return true;
+    if (session.paused || session.handoffPending || session.seenIds.includes(message.id)) return true;
     session.seenIds.push(message.id);
     session.seenIds = session.seenIds.slice(-70);
+    session.lastSourceId = message.id;
+    // Escalation remains available even after the Build summary has completed.
+    if (wantsHumanStaff(source.text)) {
+      session.handoffPending = true;
+      void enqueue(message.channelId, () => handoffToHuman({
+        channel: message.channel, session: sessionFor(data(), message.channelId),
+        roleId: ticketStaffRoleId, label: 'Build', persist,
+      }));
+      persist();
+      return true;
+    }
+    if (session.complete || !cfg.enabled) return true;
+    if (!apiConfigured()) {
+      void notifyTicketAiUnavailable({ channel: message.channel, session, persist });
+      return true;
+    }
     // Build details entered through the Store ticket bot's modal are shown in
     // Discord cards, not in the customer's plain messages. Read those cards on
     // first contact so the AI does not ask for information already provided.
@@ -169,7 +181,7 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
 
     void enqueue(message.channelId, async () => {
       const current = sessionFor(data(), message.channelId);
-      if (current.paused || current.complete || !data().enabled) return;
+      if (current.paused || current.handoffPending || current.lastSourceId !== message.id || current.complete || !data().enabled) return;
       const instructions = [
         'You are Bloxy, the Bloxburg Store Build-ticket intake assistant. You are an AI, not a staff member.',
         getAssistantInstructions(),
@@ -203,18 +215,23 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
         result = JSON.parse(raw);
       } catch (err) {
         console.error(`[BUILD AI] Response failed for ${message.channelId}:`, err?.message || err);
-        return; // Never post an unverified/error message to the website.
+        const fresh = sessionFor(data(), message.channelId);
+        if (fresh.lastSourceId === message.id) {
+          await notifyTicketAiUnavailable({ channel: message.channel, session: fresh, persist });
+        }
+        return; // Never post an unverified answer to the website.
       }
       // Staff may pause the AI while an API call is still in progress.
       const fresh = sessionFor(data(), message.channelId);
-      if (!data().enabled || fresh.paused || fresh.complete) return;
+      if (!data().enabled || fresh.paused || fresh.handoffPending || fresh.lastSourceId !== message.id || fresh.complete) return;
       const reply = short(result?.reply, 1800).replace(/@everyone/gi, '@ everyone').replace(/@here/gi, '@ here');
       if (!reply) return;
       const stage = ['ask', 'review', 'complete'].includes(result?.stage) ? result.stage : 'ask';
-      const buttons = stage === 'complete' ? [] : [pauseButton(message.channelId)];
+      // Staff can pause/resume through the existing /buildai commands.
+      // Don't attach a takeover button to every AI response.
       let sent;
       try {
-        sent = await message.channel.send({ content: reply, components: buttons, allowedMentions: { parse: [] } });
+        sent = await message.channel.send({ content: reply, allowedMentions: { parse: [] } });
       } catch (error) {
         console.error(`[BUILD AI] Discord send failed for ${message.channelId}:`, error?.message || error);
         return;
@@ -264,7 +281,7 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
     if (sub === 'pause' || sub === 'resume') {
       const s = sessionFor(cfg, interaction.channelId);
       s.paused = sub === 'pause';
-      if (sub === 'resume') { s.complete = false; s.stage = 'ask'; }
+      if (sub === 'resume') { s.complete = false; s.escalated = false; s.handoffPending = false; s.stage = 'ask'; }
       s.updatedAt = Date.now();
       persist();
       text = `Build AI ${s.paused ? 'paused' : 'resumed'} in this ticket.${s.paused ? ' Staff can respond without interference.' : ' It will reply when the customer next messages.'}`;
