@@ -1,18 +1,1 @@
-{
-  "name": "bloxy-moderation-bot",
-  "version": "2.26.0",
-  "private": true,
-  "type": "module",
-  "description": "Standalone Discord moderation, security, analytics, PvP tournaments, chat drops, polls, scam alerts and configurable AI chat channels.",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "node --env-file-if-exists=.env src/index.js",
-    "check": "node --check src/index.js"
-  },
-  "engines": {
-    "node": ">=22.0.0"
-  },
-  "dependencies": {
-    "discord.js": "^14.27.0"
-  }
-}
+{"type":"module"}
