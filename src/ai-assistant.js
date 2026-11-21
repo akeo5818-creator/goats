@@ -351,8 +351,21 @@ export function setupAiAssistant({ client, guildId, getState, persist, callModel
         }
         persist();
       } catch (err) {
-        console.error('[AI ASSISTANT] Chat error:',logError(err));
-        await message.reply({content:'I couldn’t answer that just now. Please try again shortly.',allowedMentions:{parse:[],repliedUser:false}}).catch(()=>{});
+        // The full provider error (with HTTP status/code) is logged by callModel.
+        // Never expose provider credentials or raw API output in customer replies.
+        console.error('[AI ASSISTANT] Chat error:', logError(err));
+        const status=Number(err?.status||0);
+        const code=String(err?.code||'');
+        const message=status===401 || status===403
+          ? 'My AI connection needs attention from the store team. Please let staff know.'
+          : status===429 && /quota|balance|spend_limit|usage_limit/i.test(code)
+          ? 'My AI credits or spending limit have been reached. Please let staff know.'
+          : status===429
+          ? 'I’m getting too many requests right now. Please try again in a moment.'
+          : status===400
+          ? 'My AI request was rejected because of a configuration problem. Please let staff know.'
+          : 'I’m having trouble answering right now. Please try again shortly.';
+        await message.reply({content:message,allowedMentions:{parse:[],repliedUser:false}}).catch(()=>{});
       }
     });
   }
@@ -423,7 +436,7 @@ export function setupAiAssistant({ client, guildId, getState, persist, callModel
     if (sub==='status') return respond(`**Bloxy AI:** ${a.enabled?'enabled':'disabled'}\n**API:** ${apiConfigured()?'connected key':'missing key'} · **Model:** ${modelName}\n**Auto-chat channels:** ${a.channelIds.length}\n**Knowledge topics:** ${a.knowledge.length}\n**Personality:** ${a.personality.length} characters\n**Memory:** Persistent to the configured state volume (up to ${MAX_TURNS} recent turns per conversation + ${MAX_SAVED_NOTES} explicit notes per user).\n**Private reporting:** ${metricsUrl&&metricsSecret?'Configured':'Requires URL and secret'}\n**Finance admins:** ${admins.size} explicit account ID(s).`);
     if (sub==='test') {
       await interaction.deferReply({flags:MessageFlags.Ephemeral});
-      try {const result=await callModel({guild:interaction.guild,channel:interaction.channel,history:[{role:'user',content:'Reply with: AI connection working'}],instructions:'Reply briefly with exactly: AI connection working'});return interaction.editReply(safe(result));}
+      try {const result=await callModel({guild:interaction.guild,channel:interaction.channel,history:[{role:'user',content:'Say hello.'},{role:'assistant',content:'Hello!'},{role:'user',content:'Reply with exactly: AI connection working'}],instructions:'Reply briefly with exactly: AI connection working'});return interaction.editReply(safe(result));}
       catch(e){return interaction.editReply(`AI provider error: ${safe(logError(e))}`);}
     }
     return respond('Unsupported AI command.');

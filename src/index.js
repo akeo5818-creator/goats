@@ -282,7 +282,8 @@ const MODERATOR_COMMAND_NAMES = new Set([
 ]);
 
 const commands = [
-  aiCommand,
+  // /ai is registered globally so it works in DMs AND this guild.
+  // Never register a second guild-specific /ai: Discord shows both copies.
   buildAiCommand,
   new SlashCommandBuilder()
     .setName('lockdown')
@@ -899,9 +900,7 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(c => {
   const json = c.toJSON();
-  // contexts/integration_types apply only to globally registered commands.
-  // DM-capable /ai is separately registered globally using aiCommand.toJSON().
-  if (json.name === 'ai') { delete json.contexts; delete json.integration_types; }
+  // /ai is registered only as a global command (with Guild + BotDM contexts).
   if (MODERATOR_COMMAND_NAMES.has(json.name)) {
     json.default_member_permissions = PermissionFlagsBits.ModerateMembers.toString();
   }
@@ -940,10 +939,11 @@ client.once('ready', async () => {
         .setIntegrationTypes(ApplicationIntegrationType.GuildInstall)
         .toJSON();
     });
-    // Global slash commands are necessary for DM usage; the server-specific
-    // definitions of these same commands take precedence inside the guild.
-    for (const command of [...dmEnabled, aiCommand.toJSON()]) await rest.post(Routes.applicationCommands(client.user.id), { body: command });
-    console.log(`[COMMANDS] Registered ${commands.length} guild commands plus DM-capable /invites, /myinvite and /ai.`);
+    // Replace our complete global command set rather than POSTing every restart.
+    // This also cleans up stale /aichat definitions and prevents duplicate /ai.
+    const globalCommands = [...dmEnabled, aiCommand.toJSON()];
+    await rest.put(Routes.applicationCommands(client.user.id), { body: globalCommands });
+    console.log(`[COMMANDS] Synced ${commands.length} guild commands and ${globalCommands.length} global commands (one /ai).`);
   } catch (error) {
     console.error('[COMMANDS] Registration failed:', error);
   }
@@ -2963,10 +2963,16 @@ async function requestAiChatCompletion({ guild, channel, history, instructions =
   if (!CONFIG.aiApiKey) throw new Error('OPENAI_API_KEY is not configured.');
 
   const aiState = ensureAiChatState();
-  const input = history.slice(-Math.max(1, Math.min(50, Number(historyLimit) || AI_HISTORY_LIMIT))).map(turn => ({
-    role: turn.role === 'assistant' ? 'assistant' : 'user',
-    content: [{ type: 'input_text', text: truncate(turn.content, AI_INPUT_CHAR_LIMIT) }],
-  }));
+  // Responses API requires OUTPUT_TEXT for replayed assistant messages.
+  // INPUT_TEXT works for customer messages but causes HTTP 400 on the second
+  // conversational request if used for previous assistant replies.
+  const input = history.slice(-Math.max(1, Math.min(50, Number(historyLimit) || AI_HISTORY_LIMIT))).map(turn => {
+    const assistant = turn.role === 'assistant';
+    return {
+      role: assistant ? 'assistant' : 'user',
+      content: [{ type: assistant ? 'output_text' : 'input_text', text: truncate(turn.content, AI_INPUT_CHAR_LIMIT) }],
+    };
+  });
 
   if (Array.isArray(imageUrls) && imageUrls.length) {
     const lastUser = [...input].reverse().find(item => item.role === 'user');
