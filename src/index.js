@@ -239,7 +239,7 @@ const buildAi = setupBuildAi({
   getState: () => state, persist: saveState,
   callModel: requestAiChatCompletion, apiConfigured: () => Boolean(CONFIG.aiApiKey),
   ticketBotId: CONFIG.ticketBotId, staffRoleIds: CONFIG.buildAiStaffRoleIds, ticketStaffRoleId: CONFIG.aiTicketStaffRoleId,
-  getAssistantInstructions: () => aiAssistant.getBuildInstructions(),
+  getAssistantInstructions: (message) => aiAssistant.getBuildInstructions(message),
 });
 
 const aiAssistant = setupAiAssistant({

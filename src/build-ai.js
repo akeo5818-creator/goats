@@ -184,7 +184,7 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
       if (current.paused || current.handoffPending || current.lastSourceId !== message.id || current.complete || !data().enabled) return;
       const instructions = [
         'You are Bloxy, the Bloxburg Store Build-ticket intake assistant. You are an AI, not a staff member.',
-        getAssistantInstructions(),
+        getAssistantInstructions(message),
         'Ask concise, friendly follow-up questions to gather the CUSTOM QUESTIONS below. You can ask 1 or 2 related questions at a time.',
         'Use facts already supplied in this conversation or the initial Build form. Do not repeat a question already answered.',
         'Do not invent requirements, prices, deadlines, account details, order statuses, or promises. Never ask for passwords, cookies, tokens or other secrets.',
