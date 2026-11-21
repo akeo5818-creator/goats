@@ -1,3 +1,5 @@
+import { aiCommand, setupAiAssistant } from './ai-assistant.js';
+import { buildAiCommand, setupBuildAi } from './build-ai.js';
 import {
   ActionRowBuilder,
   ActivityType,
@@ -65,7 +67,9 @@ const CONFIG = {
   tournamentCustomerRoleIds: String(process.env.TOURNAMENT_CUSTOMER_ROLE_IDS || '1542046269290315797')
     .split(',').map(id => id.trim()).filter(Boolean),
   aiApiKey: String(process.env.OPENAI_API_KEY || '').trim(),
-  aiModel: String(process.env.AI_MODEL || 'gpt-5.6-luna').trim(),
+  ticketBotId: String(process.env.STORE_TICKET_BOT_ID || '').trim(),
+  buildAiStaffRoleIds: String(process.env.BUILD_AI_STAFF_ROLE_IDS || '1537689864827445282,1543902943009312870').split(',').map(x=>x.trim()).filter(Boolean),
+  aiModel: String(process.env.AI_MODEL || 'gpt-6-luna').trim(),
   aiMaxOutputTokens: clampNumber(Number(process.env.AI_MAX_OUTPUT_TOKENS || 500), 100, 1200, 500),
   aiUserCooldownMs: clampNumber(Number(process.env.AI_USER_COOLDOWN_MS || 2500), 0, 60000, 2500),
   altAlertThreshold: clampNumber(Number(process.env.ALT_ALERT_THRESHOLD || 40), 20, 100, 40),
@@ -228,6 +232,23 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
+const buildAi = setupBuildAi({
+  client, guildId: CONFIG.guildId,
+  getState: () => state, persist: saveState,
+  callModel: requestAiChatCompletion, apiConfigured: () => Boolean(CONFIG.aiApiKey),
+  ticketBotId: CONFIG.ticketBotId, staffRoleIds: CONFIG.buildAiStaffRoleIds,
+  getAssistantInstructions: () => aiAssistant.getBuildInstructions(),
+});
+
+const aiAssistant = setupAiAssistant({
+  client, guildId: CONFIG.guildId, getState: () => state, persist: saveState,
+  callModel: requestAiChatCompletion, apiConfigured: () => Boolean(CONFIG.aiApiKey),
+  adminIds: String(process.env.AI_ADMIN_USER_IDS || '').split(',').map(x => x.trim()).filter(Boolean),
+  ticketBotId: CONFIG.ticketBotId, staffRoleIds: CONFIG.buildAiStaffRoleIds,
+  metricsUrl: String(process.env.STORE_SALES_API_URL || '').trim(),
+  metricsSecret: String(process.env.STORE_AI_REPORT_SECRET || '').trim(), modelName: CONFIG.aiModel,
+});
+
 const inviteSnapshot = new Map();
 let inviteDetectionQueue = Promise.resolve();
 let inviteLeaderboardTimer = null;
@@ -257,10 +278,12 @@ const MODERATOR_COMMAND_NAMES = new Set([
   'mute', 'unmute', 'timeout', 'untimeout',
   'kick', 'ban', 'unban', 'tempban', 'softban', 'baninfo', 'banlist',
   'altcheck', 'censorlist', 'censoradd', 'censorremove',
-  'slowmode', 'lockchannel', 'unlockchannel', 'nick', 'talk', 'aichat',
+  'slowmode', 'lockchannel', 'unlockchannel', 'nick', 'talk',
 ]);
 
 const commands = [
+  aiCommand,
+  buildAiCommand,
   new SlashCommandBuilder()
     .setName('lockdown')
     .setDescription('Hide the emergency category from the Customer role.')
@@ -868,35 +891,6 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
-    .setName('aichat')
-    .setDescription('Configure the AI chat channels and personality.')
-    .addSubcommand(s => s
-      .setName('add')
-      .setDescription('Let the AI reply to normal messages in a channel.')
-      .addChannelOption(o => o.setName('channel').setDescription('Channel where the AI should chat.').setRequired(true).addChannelTypes(ChannelType.GuildText)))
-    .addSubcommand(s => s
-      .setName('remove')
-      .setDescription('Stop the AI from replying in a channel.')
-      .addChannelOption(o => o.setName('channel').setDescription('AI channel to remove.').setRequired(true).addChannelTypes(ChannelType.GuildText)))
-    .addSubcommand(s => s.setName('list').setDescription('List every channel where AI chat is enabled.'))
-    .addSubcommand(s => s.setName('status').setDescription('Show AI chat configuration and API status.'))
-    .addSubcommand(s => s.setName('test').setDescription('Test the OpenAI connection and show the exact result to staff.'))
-    .addSubcommand(s => s
-      .setName('enable')
-      .setDescription('Globally turn AI chat on or off without deleting configured channels.')
-      .addBooleanOption(o => o.setName('enabled').setDescription('Whether AI chat should respond.').setRequired(true)))
-    .addSubcommand(s => s
-      .setName('personality')
-      .setDescription('Set the AI personality/instructions for this server.')
-      .addStringOption(o => o.setName('instructions').setDescription('How the AI should speak and behave.').setRequired(true).setMinLength(10).setMaxLength(1500)))
-    .addSubcommand(s => s.setName('resetpersonality').setDescription('Restore the default Blox & Co. AI personality.'))
-    .addSubcommand(s => s
-      .setName('reset')
-      .setDescription('Clear the AI short-term conversation memory.')
-      .addChannelOption(o => o.setName('channel').setDescription('Only clear one AI channel. Leave blank to clear all.').addChannelTypes(ChannelType.GuildText)))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
-
-  new SlashCommandBuilder()
     .setName('dmall')
     .setDescription('DM text, an image, or both to all members or one role.')
     .addStringOption(o => o.setName('message').setDescription('Optional text message to send.').setRequired(false).setMinLength(1).setMaxLength(2000))
@@ -905,6 +899,9 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(c => {
   const json = c.toJSON();
+  // contexts/integration_types apply only to globally registered commands.
+  // DM-capable /ai is separately registered globally using aiCommand.toJSON().
+  if (json.name === 'ai') { delete json.contexts; delete json.integration_types; }
   if (MODERATOR_COMMAND_NAMES.has(json.name)) {
     json.default_member_permissions = PermissionFlagsBits.ModerateMembers.toString();
   }
@@ -945,8 +942,8 @@ client.once('ready', async () => {
     });
     // Global slash commands are necessary for DM usage; the server-specific
     // definitions of these same commands take precedence inside the guild.
-    for (const command of dmEnabled) await rest.post(Routes.applicationCommands(client.user.id), { body: command });
-    console.log(`[COMMANDS] Registered ${commands.length} guild commands plus DM-capable /invites and /myinvite.`);
+    for (const command of [...dmEnabled, aiCommand.toJSON()]) await rest.post(Routes.applicationCommands(client.user.id), { body: command });
+    console.log(`[COMMANDS] Registered ${commands.length} guild commands plus DM-capable /invites, /myinvite and /ai.`);
   } catch (error) {
     console.error('[COMMANDS] Registration failed:', error);
   }
@@ -960,6 +957,7 @@ client.once('ready', async () => {
 
   setInterval(checkBaptismSchedule, 60_000).unref();
   setInterval(checkTempBans, 60_000).unref();
+  aiAssistant.startSchedules();
   await checkBaptismSchedule();
   await checkTempBans();
 
@@ -1958,19 +1956,26 @@ async function moderateTournamentThreadMessage(message) {
 }
 
 client.on('messageCreate', async message => {
-  if (message.author?.bot) return;
+  if (message.author?.bot) {
+    await buildAi.handleMessage(message).catch(error => console.error('[BUILD AI] Bot-card handling failed:', error));
+    await aiAssistant.handleSupportMessage(message).catch(error => console.error('[SUPPORT AI] Bot-card handling failed:', error));
+    return;
+  }
 
   // Direct messages do not belong to a guild. Log them separately instead of
   // passing them through the guild automod/censor pipeline.
   if (!message.guild) {
     await logIncomingDM(message).catch(error => console.error('[DM LOG] Incoming DM log failed:', error));
+    await aiAssistant.handleMessage(message).catch(error => console.error('[AI] DM handling failed:', error));
     return;
   }
 
   if (await moderateTournamentThreadMessage(message).catch(error => { console.error('[TOURNAMENT] Thread moderation failed:', error); return false; })) return;
   await moderateMessage(message).catch(error => console.error('[AUTOMOD] messageCreate failed:', error));
   if (message.deleted) return;
-  await maybeHandleAiChatMessage(message).catch(error => console.error('[AI CHAT] messageCreate failed:', error));
+  if (await buildAi.handleMessage(message).catch(error => { console.error('[BUILD AI] Message handling failed:', error); return false; })) return;
+  if (await aiAssistant.handleSupportMessage(message).catch(error => { console.error('[SUPPORT AI] Message handling failed:', error); return false; })) return;
+  await aiAssistant.handleMessage(message).catch(error => console.error('[AI] Message handling failed:', error));
 });
 
 client.on('messageUpdate', async (_oldMessage, newMessage) => {
@@ -2087,6 +2092,8 @@ client.on('interactionCreate', async interaction => {
       return;
     }
     if (interaction.isButton()) {
+      if (interaction.customId.startsWith('buildai:')) return buildAi.handleButton(interaction);
+      if (interaction.customId.startsWith('supportai:')) return aiAssistant.handleSupportButton(interaction);
       if (interaction.customId.startsWith('invcomp:')) return handleInviteCompetitionButton(interaction);
       if (interaction.customId.startsWith('dmpoll:')) return handleDmPollButton(interaction);
       if (interaction.customId.startsWith('tour:')) return handleTournamentButton(interaction);
@@ -2106,6 +2113,7 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.inGuild()) {
       if (interaction.commandName === 'invites') return handleInvites(interaction);
       if (interaction.commandName === 'myinvite') return handleMyInvite(interaction);
+      if (interaction.commandName === 'ai') return aiAssistant.handleCommand(interaction);
       return;
     }
     if (interaction.guildId !== CONFIG.guildId) return;
@@ -2138,7 +2146,8 @@ client.on('interactionCreate', async interaction => {
       case 'unlockchannel': return handleUnlockChannel(interaction);
       case 'nick': return handleNick(interaction);
       case 'talk': return handleTalk(interaction);
-      case 'aichat': return handleAiChatCommand(interaction);
+      case 'ai': return aiAssistant.handleCommand(interaction);
+      case 'buildai': return buildAi.handleCommand(interaction);
       case 'roleinfo': return handleRoleInfo(interaction);
       case 'memberinfo': return handleMemberInfo(interaction);
       case 'serverinfo': return handleServerInfo(interaction);
@@ -2950,28 +2959,36 @@ function waitMs(ms) {
   return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
 }
 
-async function requestAiChatCompletion({ guild, channel, history }) {
+async function requestAiChatCompletion({ guild, channel, history, instructions = null, format = null, historyLimit = AI_HISTORY_LIMIT, imageUrls = [] }) {
   if (!CONFIG.aiApiKey) throw new Error('OPENAI_API_KEY is not configured.');
 
   const aiState = ensureAiChatState();
-  const input = history.slice(-AI_HISTORY_LIMIT).map(turn => ({
+  const input = history.slice(-Math.max(1, Math.min(50, Number(historyLimit) || AI_HISTORY_LIMIT))).map(turn => ({
     role: turn.role === 'assistant' ? 'assistant' : 'user',
     content: [{ type: 'input_text', text: truncate(turn.content, AI_INPUT_CHAR_LIMIT) }],
   }));
 
+  if (Array.isArray(imageUrls) && imageUrls.length) {
+    const lastUser = [...input].reverse().find(item => item.role === 'user');
+    if (lastUser) for (const url of imageUrls.slice(0, 3)) {
+      if (/^https:\/\//i.test(String(url))) lastUser.content.push({ type: 'input_image', image_url: String(url), detail: 'low' });
+    }
+  }
+
   const requestBody = {
     model: CONFIG.aiModel,
     store: false,
-    // Discord chat should be quick and cheap. GPT-5.6 Luna defaults to medium
+    // Discord chat should be quick and cheap. Luna models can default to
     // reasoning, and max_output_tokens includes reasoning tokens. With a small
     // output cap that could occasionally leave no visible reply, so disable
     // reasoning for this conversational use case.
     reasoning: { effort: 'none' },
     text: { verbosity: 'low' },
     max_output_tokens: CONFIG.aiMaxOutputTokens,
-    instructions: `${aiState.personality}\n\nYou are currently chatting in the Discord server "${guild.name}" inside #${channel.name}. Messages from members are prefixed with their display name. Reply to the newest member message, while using the recent conversation only when it helps. Do not include a name prefix for yourself.`,
+    instructions: instructions || `${aiState.personality}\n\nYou are currently chatting in the Discord server "${guild.name}" inside #${channel.name}. Messages from members are prefixed with their display name. Reply to the newest member message, while using the recent conversation only when it helps. Do not include a name prefix for yourself.`,
     input,
   };
+  if (format) requestBody.text.format = format;
 
   const maxAttempts = 3;
   let lastError = null;
@@ -3036,7 +3053,14 @@ async function requestAiChatCompletion({ guild, channel, history }) {
 
 async function maybeHandleAiChatMessage(message) {
   const aiState = ensureAiChatState();
-  if (!aiState.enabled || !aiState.channelIds.includes(String(message.channelId))) return;
+  const configuredChannel = aiState.channelIds.includes(String(message.channelId));
+  const wasMentioned = Boolean(message.mentions?.users?.has(client.user?.id));
+  if (!aiState.enabled || (!configuredChannel && !wasMentioned && !message.reference?.messageId)) return;
+  const replyTarget = !configuredChannel && !wasMentioned && message.reference?.messageId
+    ? (message.channel.messages.cache.get(message.reference.messageId)
+      || await message.fetchReference().catch(() => null)) : null;
+  const isReplyToThisBot = Boolean(replyTarget?.author?.id === client.user?.id);
+  if (!configuredChannel && !wasMentioned && !isReplyToThisBot) return;
   if (!message.channel?.isTextBased?.() || message.channel.isThread?.()) return;
 
   const text = aiSafeInputText(message);
