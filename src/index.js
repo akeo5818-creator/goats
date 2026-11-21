@@ -1,4 +1,5 @@
 import { aiCommand, setupAiAssistant } from './ai-assistant.js';
+import { setupAdminActions } from './ai-admin-actions.js';
 import { buildAiCommand, setupBuildAi } from './build-ai.js';
 import {
   ActionRowBuilder,
@@ -253,6 +254,12 @@ const aiAssistant = setupAiAssistant({
   metricsSecret: String(process.env.STORE_AI_REPORT_SECRET || '').trim(),
   actionUrl: String(process.env.STORE_AI_ACTION_URL || '').trim(),
   actionSecret: String(process.env.STORE_AI_ACTION_SECRET || '').trim(), modelName: CONFIG.aiModel,
+});
+
+const aiAdminActions = setupAdminActions({
+  client, guildId: CONFIG.guildId,
+  adminIds: String(process.env.AI_ADMIN_USER_IDS || '').split(',').map(x => x.trim()).filter(Boolean),
+  callModel: requestAiChatCompletion,
 });
 
 const inviteSnapshot = new Map();
@@ -1973,6 +1980,7 @@ client.on('messageCreate', async message => {
   // passing them through the guild automod/censor pipeline.
   if (!message.guild) {
     await logIncomingDM(message).catch(error => console.error('[DM LOG] Incoming DM log failed:', error));
+    if (await aiAdminActions.handleMessage(message).catch(error => { console.error('[AI ADMIN ACTION] DM handling failed:',error); return false; })) return;
     if (await aiAssistant.handleAdminCorrection(message).catch(error => { console.error('[AI CORRECTION] DM handling failed:',error); return false; })) return;
     await aiAssistant.handleMessage(message).catch(error => console.error('[AI] DM handling failed:', error));
     return;
@@ -1983,6 +1991,7 @@ client.on('messageCreate', async message => {
   if (message.deleted) return;
   // Admin corrections to Billy must be processed before Build/Support handlers
   // discard staff messages. This applies to replies in private ticket channels.
+  if (await aiAdminActions.handleMessage(message).catch(error=>{console.error('[AI ADMIN ACTION] Message failed:',error);return false;}))return;
   if (await aiAssistant.handleAdminCorrection(message).catch(error=>{console.error('[AI CORRECTION] Message failed:',error);return false;}))return;
   if (await aiAssistant.handleTicketActionMessage(message).catch(error=>{console.error('[AI ACTION] Message failed:',error);return false;}))return;
   if (await buildAi.handleMessage(message).catch(error => { console.error('[BUILD AI] Message handling failed:', error); return false; })) return;
