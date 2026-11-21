@@ -249,7 +249,9 @@ const aiAssistant = setupAiAssistant({
   ticketBotId: CONFIG.ticketBotId, staffRoleIds: CONFIG.buildAiStaffRoleIds,
   moderatorRoleId: CONFIG.aiModeratorRoleId, ticketStaffRoleId: CONFIG.aiTicketStaffRoleId,
   metricsUrl: String(process.env.STORE_SALES_API_URL || '').trim(),
-  metricsSecret: String(process.env.STORE_AI_REPORT_SECRET || '').trim(), modelName: CONFIG.aiModel,
+  metricsSecret: String(process.env.STORE_AI_REPORT_SECRET || '').trim(),
+  actionUrl: String(process.env.STORE_AI_ACTION_URL || '').trim(),
+  actionSecret: String(process.env.STORE_AI_ACTION_SECRET || '').trim(), modelName: CONFIG.aiModel,
 });
 
 const inviteSnapshot = new Map();
@@ -1960,6 +1962,7 @@ async function moderateTournamentThreadMessage(message) {
 
 client.on('messageCreate', async message => {
   if (message.author?.bot) {
+    if (await aiAssistant.handleTicketActionMessage(message).catch(error=>{console.error('[AI ACTION] Bot-card failed:',error);return false;}))return;
     await buildAi.handleMessage(message).catch(error => console.error('[BUILD AI] Bot-card handling failed:', error));
     await aiAssistant.handleSupportMessage(message).catch(error => console.error('[SUPPORT AI] Bot-card handling failed:', error));
     return;
@@ -1976,6 +1979,7 @@ client.on('messageCreate', async message => {
   if (await moderateTournamentThreadMessage(message).catch(error => { console.error('[TOURNAMENT] Thread moderation failed:', error); return false; })) return;
   await moderateMessage(message).catch(error => console.error('[AUTOMOD] messageCreate failed:', error));
   if (message.deleted) return;
+  if (await aiAssistant.handleTicketActionMessage(message).catch(error=>{console.error('[AI ACTION] Message failed:',error);return false;}))return;
   if (await buildAi.handleMessage(message).catch(error => { console.error('[BUILD AI] Message handling failed:', error); return false; })) return;
   if (await aiAssistant.handleSupportMessage(message).catch(error => { console.error('[SUPPORT AI] Message handling failed:', error); return false; })) return;
   await aiAssistant.handleMessage(message).catch(error => console.error('[AI] Message handling failed:', error));
