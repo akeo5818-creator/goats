@@ -87,6 +87,7 @@ function heuristicPlan(normalized,mentionedChannel) {
 
 export function setupAdminActions({client,guildId,adminIds=[],callModel}) {
   const ownerIds=new Set(adminIds.map(String).filter(id=>SNOWFLAKE.test(id)));
+  const roleIds=new Set((process.env.AI_ADMIN_ROLE_IDS||'').split(',').map(x=>x.trim()).filter(x=>SNOWFLAKE.test(x)));
   const channelLocks=new Set();
   const processedActionIds=new Set();
   const actionLog=[];
@@ -99,7 +100,8 @@ export function setupAdminActions({client,guildId,adminIds=[],callModel}) {
     if(!message?.author || message.author.bot)return false;
     if(!message.guild)return ownerIds.has(message.author.id);
     return message.guildId===guildId && (ownerIds.has(message.author.id) ||
-      Boolean(message.member?.permissions?.has?.(PermissionFlagsBits.Administrator)));
+      Boolean(message.member?.permissions?.has?.(PermissionFlagsBits.Administrator)) ||
+      Boolean(message.member?.roles?.cache?.some?.(role=>roleIds.has(role.id))));
   }
   async function resolveChannel(message, channelText, source) {
     const guild=message.guild || client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(()=>null);
