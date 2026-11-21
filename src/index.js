@@ -1973,6 +1973,7 @@ client.on('messageCreate', async message => {
   // passing them through the guild automod/censor pipeline.
   if (!message.guild) {
     await logIncomingDM(message).catch(error => console.error('[DM LOG] Incoming DM log failed:', error));
+    if (await aiAssistant.handleAdminCorrection(message).catch(error => { console.error('[AI CORRECTION] DM handling failed:',error); return false; })) return;
     await aiAssistant.handleMessage(message).catch(error => console.error('[AI] DM handling failed:', error));
     return;
   }
@@ -1980,6 +1981,9 @@ client.on('messageCreate', async message => {
   if (await moderateTournamentThreadMessage(message).catch(error => { console.error('[TOURNAMENT] Thread moderation failed:', error); return false; })) return;
   await moderateMessage(message).catch(error => console.error('[AUTOMOD] messageCreate failed:', error));
   if (message.deleted) return;
+  // Admin corrections to Billy must be processed before Build/Support handlers
+  // discard staff messages. This applies to replies in private ticket channels.
+  if (await aiAssistant.handleAdminCorrection(message).catch(error=>{console.error('[AI CORRECTION] Message failed:',error);return false;}))return;
   if (await aiAssistant.handleTicketActionMessage(message).catch(error=>{console.error('[AI ACTION] Message failed:',error);return false;}))return;
   if (await buildAi.handleMessage(message).catch(error => { console.error('[BUILD AI] Message handling failed:', error); return false; })) return;
   if (await aiAssistant.handleSupportMessage(message).catch(error => { console.error('[SUPPORT AI] Message handling failed:', error); return false; })) return;
