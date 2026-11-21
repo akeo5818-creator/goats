@@ -3459,16 +3459,40 @@ function normalizeStoredCensorTerms(terms) {
 
 function findCensorMatch(content) {
   const base = normalizeCensorText(content);
-  const spaced = ` ${base.replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ')} `;
-  const compact = base.replace(/[^a-z0-9]+/g, '');
+  // Never collapse whitespace between different words. Previously the text
+  // "And add your" was collapsed to "andaddyour", triggering "daddy".
+  // Only collapse punctuation inside an individual whitespace-delimited part,
+  // and require the result to be an entire word rather than a substring.
+  const tokens = String(content || '').normalize('NFKD').split(/\s+/u)
+    .map(part => part.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
+    .map(part => normalizeCensorText(part).replace(/[^a-z0-9]/g, ''))
+    .filter(Boolean);
+
+  // Explicitly spaced-out letters are a common deliberate bypass, e.g.
+  // "d a d d y". Match these only when EVERY original token is one letter;
+  // do not glue normal words such as "and add your" together.
+  const letterTokens = base.match(/[a-z0-9]+/g) || [];
 
   for (const original of state.censoredTerms || []) {
     const term = normalizeCensorTerm(original);
     if (!term) continue;
-    if (spaced.includes(` ${term} `)) return original;
-
     const termCompact = term.replace(/ /g, '');
-    if (!term.includes(' ') && termCompact.length >= 4 && compact.includes(termCompact)) return original;
+    if (!termCompact) continue;
+
+    // Exact full-word matches, including standard leetspeak (d4ddy) and
+    // punctuation-only obfuscation (d.a.d.d.y or d-a-d-d-y).
+    if (tokens.includes(termCompact)) return original;
+
+    // Spaced single-character bypasses (d a d d y) without joining normal
+    // multi-character words. Avoid accidental matching of short terms.
+    if (termCompact.length >= 4) {
+      for (let i = 0; i <= letterTokens.length - termCompact.length; i++) {
+        const run = letterTokens.slice(i, i + termCompact.length);
+        if (run.every(part => part.length === 1) && run.join('') === termCompact) {
+          return original;
+        }
+      }
+    }
   }
   return null;
 }
