@@ -102,12 +102,13 @@ export function setupAdminActions({client,guildId,adminIds=[],callModel}) {
       if(ownerIds.has(message.author.id))return true;
       try {
         const guild=client.guilds.cache.get(guildId)||await client.guilds.fetch(guildId);
+        if(guild.ownerId===message.author.id)return true;
         const member=await guild.members.fetch(String(message.author.id));
         return Boolean(member?.permissions?.has?.(PermissionFlagsBits.Administrator) ||
           member?.roles?.cache?.some?.(role=>roleIds.has(role.id)));
       } catch {return false;}
     }
-    return message.guildId===guildId && (ownerIds.has(message.author.id) ||
+    return message.guildId===guildId && (message.guild?.ownerId===message.author.id || ownerIds.has(message.author.id) ||
       Boolean(message.member?.permissions?.has?.(PermissionFlagsBits.Administrator)) ||
       Boolean(message.member?.roles?.cache?.some?.(role=>roleIds.has(role.id))));
   }

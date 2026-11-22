@@ -70,7 +70,7 @@ git push
 
 # Bloxburg Moderation Bot v2.22 - Scam Alert Channel + Live Server Profiles
 
-This build keeps the Moderator visibility, PvP tournament visibility, and v2.21 AI reliability fixes, and upgrades Scam Alerts with a configurable destination channel plus automatic server-profile refreshes.
+This build keeps the Moderator visibility and v2.21 AI reliability fixes, and upgrades Scam Alerts with a configurable destination channel plus automatic server-profile refreshes.
 
 ## AI chat
 
@@ -112,8 +112,6 @@ The bot uses Node's built-in `fetch`, so no extra npm dependency is required. If
 
 - Moderator role `1543902943009312870` stays eligible for the moderation slash commands across channels.
 - `/mute` and `/unmute` aliases remain available alongside timeout commands.
-- PvP tournament channels remain visible to Customer roles when a tournament is closed/cancelled; chat becomes read-only rather than invisible.
-- Tournament visibility is re-applied when tournament mode changes.
 
 ## Deploy
 
@@ -137,3 +135,9 @@ AI chat uses `reasoning.effort: none` for fast Discord replies and retries tempo
 - Server profiles resolved from invites privately retain the invite code in bot state so the bot can re-resolve the server later. Invite codes are never rendered in the public Scam Alert.
 - Every 10 minutes, saved server profiles are checked for changes. If the server icon, name, description, counts, or resolved owner profile changes, the existing Scam Alert message is edited automatically.
 - Legacy external server profiles from older builds may need `/scamalert addserver` run once again with a valid invite so the bot has a private invite code for future refreshes.
+
+## November 22 admin & PvP cleanup
+
+- PvP tournament slash commands, startup schedulers, automatic channel re-creation, match state and handlers have been removed. Existing Discord channels are not deleted automatically: delete `#pvp-tournaments` in Discord once the new version is live. Re-register slash commands on deployment.
+- Verified guild owners/admins can request sales reports delivered to their DMs; sales remain private.
+- To verify this version is deployed, look for the startup console log `Billy admin/DM fix 2026-11-22-v2 | PvP removed`. If the bot replies with the old sales-refusal text or says it cannot see your roles, the old deployment or a second instance is still responding.
