@@ -96,9 +96,17 @@ export function setupAdminActions({client,guildId,adminIds=[],callModel}) {
     if(actionLog.length>100)actionLog.shift();
     console.log('[BILLY ADMIN ACTION]',JSON.stringify(actionLog[actionLog.length-1]));
   };
-  function authorized(message) {
+  async function authorized(message) {
     if(!message?.author || message.author.bot)return false;
-    if(!message.guild)return ownerIds.has(message.author.id);
+    if(!message.guild) {
+      if(ownerIds.has(message.author.id))return true;
+      try {
+        const guild=client.guilds.cache.get(guildId)||await client.guilds.fetch(guildId);
+        const member=await guild.members.fetch(String(message.author.id));
+        return Boolean(member?.permissions?.has?.(PermissionFlagsBits.Administrator) ||
+          member?.roles?.cache?.some?.(role=>roleIds.has(role.id)));
+      } catch {return false;}
+    }
     return message.guildId===guildId && (ownerIds.has(message.author.id) ||
       Boolean(message.member?.permissions?.has?.(PermissionFlagsBits.Administrator)) ||
       Boolean(message.member?.roles?.cache?.some?.(role=>roleIds.has(role.id))));
@@ -135,7 +143,7 @@ export function setupAdminActions({client,guildId,adminIds=[],callModel}) {
     return {action:plan.action,channel:String(plan.channel||''),user:String(plan.user||''),content:String(plan.content||'')};
   }
   async function handleMessage(message) {
-    if(!authorized(message) || !message?.channel?.isTextBased?.())return false;
+    if(!(await authorized(message)) || !message?.channel?.isTextBased?.())return false;
     const botId=String(client.user?.id||'');
     const isDm=!message.guild;
     const mentioned=Boolean(message.mentions?.users?.has?.(botId));

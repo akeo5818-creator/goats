@@ -218,6 +218,7 @@ export function setupBuildAi({ client, guildId, getState, persist, callModel, ap
       lockFulfillment(session, message.channelId, 'new paid Build Scheduling card');
       return true;
     }
+    if (getState()?.aiAssistant?.chatMutedChannelIds?.includes(String(message.channelId))) return true;
     const source = inputFromMessage(message, ticketBotId);
     if (!source) return true;
     const staff = !message.author?.bot && staffMember(message.member, staffRoles);
