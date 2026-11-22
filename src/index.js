@@ -954,7 +954,7 @@ client.on('roleDelete', async role => {
 });
 
 client.once('ready', async () => {
-  console.log(`[READY] Logged in as ${client.user.tag} | Billy admin verification fix 2026-11-22-v4 | PvP removed`);
+  console.log(`[READY] Logged in as ${client.user.tag} | Billy admin controls fix 2026-11-22-v5 | PvP removed`);
 
   try {
     const guild = await client.guilds.fetch(CONFIG.guildId);

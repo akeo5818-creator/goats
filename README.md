@@ -140,8 +140,12 @@ AI chat uses `reasoning.effort: none` for fast Discord replies and retries tempo
 
 - PvP tournament slash commands, startup schedulers, automatic channel re-creation, match state and handlers have been removed. Existing Discord channels are not deleted automatically: delete `#pvp-tournaments` in Discord once the new version is live. Re-register slash commands on deployment.
 - Verified guild owners/admins can request sales reports delivered to their DMs; sales remain private.
-- To verify this version is deployed, look for the startup console log `Billy admin role bootstrap 2026-11-22-v3 | PvP removed`. If the bot replies with the old sales-refusal text or says it cannot see your roles, the old deployment or a second instance is still responding.
+- To verify this version is deployed, look for the startup console log `Billy admin controls fix 2026-11-22-v5 | PvP removed`. If the bot replies with the old sales-refusal text or says it cannot see your roles, the old deployment or a second instance is still responding.
 
 
 ## Billy Admin marker role
 On startup the bot creates or reuses a `Billy Admin` marker role with no Discord permissions. The exact role ID is saved in persistent state and is accepted by Billy for admin-only AI actions and DMs. On the first migration, the role is automatically assigned to the guild owner, `AI_ADMIN_USER_IDS`, members with Discord Administrator/Manage Server, and members already holding an exact `Admin` or `Administrator` role. After bootstrap, role-name matching is not used for authorization. If the saved `Billy Admin` role is deleted, Billy recreates it and reruns the safe bootstrap automatically.
+
+
+## v2.26.2 Billy admin natural-language controls
+Verified Billy administrators can use natural phrases such as `@Billy I am an admin, make sure you ignore @member`, `@Billy stop ignoring @member`, and `@Billy do you ignore @member or not?`. These are handled deterministically and persisted instead of being left to the language model.

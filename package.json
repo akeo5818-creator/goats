@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "bloxy-moderation-bot",
-  "version": "2.26.1",
+  "version": "2.26.2",
   "scripts": {
     "start": "node --env-file-if-exists=.env src/index.js"
   },

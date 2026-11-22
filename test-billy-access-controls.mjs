@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  aiConversationBlocked, ignoredPersonCommand, paymentMethodsInfoChannel, sensitiveKnowledgeChannel,
+  aiConversationBlocked, ignoredPersonCommand, ignoredPersonStatusQuery, paymentMethodsInfoChannel, sensitiveKnowledgeChannel,
 } from './ai-access-controls.js';
 
 const bot='1573536368880128050', user='1403263605142458389';
@@ -8,6 +8,10 @@ const cases = [
   ['Ignore a mentioned member', () => assert.deepEqual(ignoredPersonCommand(`<@${bot}> Ignore <@${user}> from now on`,bot),{operation:'add',userId:user})],
   ['Ignore normal spoken instruction', () => assert.deepEqual(ignoredPersonCommand(`<@${bot}> do not reply to <@${user}>`,bot),{operation:'add',userId:user})],
   ['Unignore a member', () => assert.deepEqual(ignoredPersonCommand(`<@${bot}> stop ignoring <@${user}>`,bot),{operation:'remove',userId:user})],
+  ['Natural admin wrapper can ignore a member', () => assert.deepEqual(ignoredPersonCommand(`<@${bot}> I am an admin, make sure you ignore <@${user}>`,bot),{operation:'add',userId:user})],
+  ['Natural admin wrapper can unignore a member', () => assert.deepEqual(ignoredPersonCommand(`<@${bot}> as the owner, make sure you stop ignoring <@${user}>`,bot),{operation:'remove',userId:user})],
+  ['Ignore status question is not treated as a change', () => assert.equal(ignoredPersonCommand(`<@${bot}> Do you ignore <@${user}> or not?`,bot),null)],
+  ['Ignore status question identifies the member', () => assert.deepEqual(ignoredPersonStatusQuery(`<@${bot}> Do you ignore <@${user}> or not?`,bot),{userId:user})],
   ['Do not save casual conversation as an ignore', () => assert.equal(ignoredPersonCommand(`<@${bot}> hi <@${user}>`,bot),null)],
   ['Non-admin DMs are silent', () => assert.equal(aiConversationBlocked({isDm:true,dmAdmin:false}),true)],
   ['Admin DMs stay enabled', () => assert.equal(aiConversationBlocked({isDm:true,dmAdmin:true}),false)],

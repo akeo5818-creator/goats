@@ -11,16 +11,41 @@ export function sensitiveKnowledgeChannel(name) {
     || /^(?:website-)?(?:build|builds|support|cash|purchase|robux|blockbux)-/i.test(value);
 }
 
-export function ignoredPersonCommand(content, botId = '') {
+function adminControlText(content, botId = '') {
   const src = String(content || '').trim();
   const bot = String(botId || '');
-  const text = SNOWFLAKE.test(bot)
+  let text = SNOWFLAKE.test(bot)
     ? src.replace(new RegExp(`^<@!?${bot}>\\s*[,!:]?\\s*`), '').trim()
     : src;
-  let match = text.match(/^(?:please\s+)?(?:ignore|stop\s+(?:talking|responding|replying)\s+to|(?:don['’]t|do\s+not)\s+(?:talk|reply|respond)\s+to)\s+<@!?(\d{16,22})>(?:\s+(?:from\s+now\s+on|forever|in\s+(?:all|every)\s+channels?))?[.!\s]*$/i);
-  if (match) return {operation:'add', userId:match[1]};
-  match = text.match(/^(?:please\s+)?(?:unignore|stop\s+ignoring|start\s+(?:talking|responding|replying)\s+to|talk\s+to|reply\s+to)\s+<@!?(\d{16,22})>(?:\s+(?:again|from\s+now\s+on))?[.!\s]*$/i);
+  // Verified-admin authentication happens before these parsers run. This only
+  // makes natural admin phrasing less brittle; it never trusts the words
+  // "I am an admin" as authorization.
+  text = text.replace(/^(?:(?:i(?:['’]m| am)|as)\s+(?:the\s+)?(?:server\s+)?(?:owner|an?\s+admin(?:istrator)?)\s*[,;:.-]?\s*)+/i, '').trim();
+  return text;
+}
+
+export function ignoredPersonCommand(content, botId = '') {
+  let text = adminControlText(content, botId);
+  // Accept natural verified-admin wrappers such as:
+  // "make sure you ignore @user" / "I want you to stop ignoring @user".
+  text = text.replace(/^(?:please\s+)?(?:(?:make\s+sure(?:\s+you)?|ensure(?:\s+that)?|i\s+(?:want|need)\s+you\s+to|you\s+(?:need\s+to|should|must)|can\s+you|could\s+you)\s+)/i, '').trim();
+
+  // Unignore must be checked first so "stop ignoring" can never be parsed as
+  // an ignore/add operation.
+  let match = text.match(/^(?:please\s+)?(?:unignore|stop\s+ignoring|start\s+(?:talking|responding|replying)\s+to|(?:do\s+)?(?:talk|reply|respond)\s+to)\s+<@!?(\d{16,22})>(?:\s+(?:again|from\s+now\s+on|in\s+(?:all|every)\s+channels?))?[.!,\s]*$/i);
   if (match) return {operation:'remove',userId:match[1]};
+
+  match = text.match(/^(?:please\s+)?(?:ignore|stop\s+(?:talking|responding|replying)\s+to|(?:don['’]t|do\s+not)\s+(?:talk|reply|respond)\s+to)\s+<@!?(\d{16,22})>(?:\s+(?:from\s+now\s+on|forever|in\s+(?:all|every)\s+channels?))?[.!,\s]*$/i);
+  if (match) return {operation:'add', userId:match[1]};
+  return null;
+}
+
+export function ignoredPersonStatusQuery(content, botId = '') {
+  const text = adminControlText(content, botId);
+  let match = text.match(/^(?:do\s+you\s+(?:currently\s+)?ignore|are\s+you\s+(?:currently\s+)?ignoring|have\s+you\s+ignored)\s+<@!?(\d{16,22})>(?:\s+or\s+not)?[?.!,\s]*$/i);
+  if (match) return {userId:match[1]};
+  match = text.match(/^(?:is\s+<@!?(\d{16,22})>\s+(?:currently\s+)?ignored|is\s+<@!?(\d{16,22})>\s+on\s+(?:your\s+)?ignore\s+list)[?.!,\s]*$/i);
+  if (match) return {userId:match[1] || match[2]};
   return null;
 }
 
