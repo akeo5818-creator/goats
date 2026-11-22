@@ -431,13 +431,19 @@ export function setupAiAssistant({ client, guildId, getState, persist, callModel
   function isAdminId(id) { return admins.has(String(id || '')); }
   // Always authenticate against Discord's guild owner/permissions; never trust
   // a user's claim in chat, and never require the owner to set an env allowlist.
-  function verifiedGuildAdmin(message) {
-    if (!message?.guild || String(message.guild.id || message.guildId) !== String(guildId)) return false;
-    if (String(message.guild.ownerId) === String(message.author?.id)) return true;
-    return isAdminId(message.author?.id) || Boolean(
-      message.member?.permissions?.has?.(PermissionFlagsBits.Administrator) ||
-      message.member?.permissions?.has?.(PermissionFlagsBits.ManageGuild) ||
-      hasConfiguredAdminRole(message.member));
+  function verifiedGuildAdmin(message, memberOverride = null) {
+    // IMPORTANT: Discord.js Message is a class instance with getter/non-enumerable
+    // properties. Never authenticate a `{...message}` spread-copy: it can lose
+    // guild/author/member and make a real owner/admin look unauthorized.
+    const guild = message?.guild || null;
+    const member = memberOverride || message?.member || null;
+    const authorId = String(message?.author?.id || member?.id || member?.user?.id || '');
+    if (!guild || String(guild.id || message?.guildId || '') !== String(guildId) || !authorId) return false;
+    if (String(guild.ownerId || '') === authorId) return true;
+    return isAdminId(authorId) || Boolean(
+      member?.permissions?.has?.(PermissionFlagsBits.Administrator) ||
+      member?.permissions?.has?.(PermissionFlagsBits.ManageGuild) ||
+      hasConfiguredAdminRole(member));
   }
   // DMs have no role payload. Only verified admins in the configured guild qualify.
   const verifiedDmAdmins=new Set();
@@ -1435,7 +1441,7 @@ export function setupAiAssistant({ client, guildId, getState, persist, callModel
       const member=message.member || await message.guild.members.fetch(message.author.id).catch(()=>null);
       const roles=member?.roles?.cache ? [...member.roles.cache.values()].filter(role=>role.id!==message.guild.id).sort((a,b)=>b.position-a.position).map(role=>role.name) : [];
       const owner=message.guild.ownerId===message.author.id;
-      const admin=verifiedGuildAdmin({...message,member});
+      const admin=verifiedGuildAdmin(message,member);
       await message.reply({content:`Your Discord roles: ${roles.length?roles.join(', '):'No additional server roles'}.\nServer owner: **${owner?'yes':'no'}**. Billy administrator: **${admin?'verified':'not verified'}**.`,allowedMentions:{parse:[],repliedUser:false}}).catch(()=>{});
       return true;
     }
@@ -1449,7 +1455,7 @@ export function setupAiAssistant({ client, guildId, getState, persist, callModel
       // silently rejected real administrators. The account ID comes from Discord,
       // never from the user's chat text or a claim to be an admin.
       const member=message.member || await message.guild.members.fetch(message.author.id).catch(()=>null);
-      const authorized=verifiedGuildAdmin({...message,member});
+      const authorized=verifiedGuildAdmin(message,member);
       if (authorized && /\b(?:dm|direct message|privately|send me)\b/i.test(raw)) {
         const delivered=await message.author.send({content:'Preparing your private store sales report.',allowedMentions:{parse:[]}}).then(()=>true).catch(()=>false);
         if (delivered) {

@@ -1,1 +1,15 @@
-{"type":"module","name":"bloxy-moderation-bot","version":"2.26.0","scripts":{"start":"node --env-file-if-exists=.env src/index.js"},"dependencies":{"discord.js":"^14.27.0"},"engines":{"node":">=22.0.0"},"private":true}
+{
+  "type": "module",
+  "name": "bloxy-moderation-bot",
+  "version": "2.26.1",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "private": true
+}
