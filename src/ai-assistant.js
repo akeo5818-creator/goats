@@ -365,7 +365,14 @@ export function setupAiAssistant({ client, guildId, getState, persist, callModel
   const ticketActions = setupTicketActions({client,guildId,getState,persist,ticketBotId,moderatorRoleId,ticketStaffRoleId,
     apiUrl:actionUrl,apiSecret:actionSecret,callModel});
   const admins = new Set(adminIds.filter(isId));
-  const hasConfiguredAdminRole = member => Boolean(member?.roles?.cache?.some?.(role=>ADMIN_ROLE_IDS.has(role.id)) || (Array.isArray(member?.roles) && member.roles.some(id=>ADMIN_ROLE_IDS.has(String(id)))));
+  const billyAdminRoleId = () => String(getState()?.aiAssistant?.billyAdminRoleId || '');
+  const hasConfiguredAdminRole = member => {
+    const dynamicRoleId=billyAdminRoleId();
+    return Boolean(
+      member?.roles?.cache?.some?.(role=>ADMIN_ROLE_IDS.has(role.id) || (dynamicRoleId && role.id===dynamicRoleId)) ||
+      (Array.isArray(member?.roles) && member.roles.some(id=>ADMIN_ROLE_IDS.has(String(id)) || (dynamicRoleId && String(id)===dynamicRoleId)))
+    );
+  };
   const supportStaff = new Set(staffRoleIds.filter(isId));
   const queues = new Map();
   const instanceStartedAt = Date.now();
@@ -446,7 +453,12 @@ export function setupAiAssistant({ client, guildId, getState, persist, callModel
     } catch { verifiedDmAdmins.delete(String(id)); return false; }
   }
   function isConfigAdmin(interaction) {
-    return isAdminId(interaction.user?.id) || (interaction.guildId===guildId && Boolean(interaction.guild?.ownerId===interaction.user?.id || interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) || interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) || (interaction.member?.roles && [...ADMIN_ROLE_IDS].some(id=>interaction.member.roles?.cache?.has?.(id) || interaction.member.roles?.includes?.(id)))));
+    return isAdminId(interaction.user?.id) || (interaction.guildId===guildId && Boolean(
+      interaction.guild?.ownerId===interaction.user?.id ||
+      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+      interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ||
+      hasConfiguredAdminRole(interaction.member)
+    ));
   }
   // Normal conversations are per-user per-channel. A single shared channel
   // history made other members' messages contaminate this person's context.

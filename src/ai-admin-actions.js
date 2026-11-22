@@ -85,9 +85,13 @@ function heuristicPlan(normalized,mentionedChannel) {
   return null;
 }
 
-export function setupAdminActions({client,guildId,adminIds=[],callModel}) {
+export function setupAdminActions({client,guildId,adminIds=[],callModel,getBillyAdminRoleId=()=>''}) {
   const ownerIds=new Set(adminIds.map(String).filter(id=>SNOWFLAKE.test(id)));
   const roleIds=new Set((process.env.AI_ADMIN_ROLE_IDS||'').split(',').map(x=>x.trim()).filter(x=>SNOWFLAKE.test(x)));
+  const hasAdminRole=member=>{
+    const dynamicRoleId=String(getBillyAdminRoleId?.()||'');
+    return Boolean(member?.roles?.cache?.some?.(role=>roleIds.has(role.id) || (dynamicRoleId && role.id===dynamicRoleId)));
+  };
   const channelLocks=new Set();
   const processedActionIds=new Set();
   const actionLog=[];
@@ -105,12 +109,14 @@ export function setupAdminActions({client,guildId,adminIds=[],callModel}) {
         if(guild.ownerId===message.author.id)return true;
         const member=await guild.members.fetch(String(message.author.id));
         return Boolean(member?.permissions?.has?.(PermissionFlagsBits.Administrator) ||
-          member?.roles?.cache?.some?.(role=>roleIds.has(role.id)));
+          member?.permissions?.has?.(PermissionFlagsBits.ManageGuild) ||
+          hasAdminRole(member));
       } catch {return false;}
     }
     return message.guildId===guildId && (message.guild?.ownerId===message.author.id || ownerIds.has(message.author.id) ||
       Boolean(message.member?.permissions?.has?.(PermissionFlagsBits.Administrator)) ||
-      Boolean(message.member?.roles?.cache?.some?.(role=>roleIds.has(role.id))));
+      Boolean(message.member?.permissions?.has?.(PermissionFlagsBits.ManageGuild)) ||
+      hasAdminRole(message.member));
   }
   async function resolveChannel(message, channelText, source) {
     const guild=message.guild || client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(()=>null);

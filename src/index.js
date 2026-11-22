@@ -87,6 +87,7 @@ const SUPPORT_TICKETS_URL = 'https://discord.com/channels/1537689864827445278/15
 const FAQ_CHANNEL_NAME = 'faq';
 const CHAMPION_ROLE_NAME = 'Champion';
 const LINK_BYPASS_ROLE_NAME = 'Link Bypass';
+const BILLY_ADMIN_ROLE_NAME = 'Billy Admin';
 const SCAM_ALERTS_ROLE_NAME = 'Scam alerts';
 const GIVEAWAY_EMOJI_ID = '1540636417577721927';
 const GIVEAWAY_EMOJI_NAME = 'giveaway';
@@ -252,6 +253,7 @@ const aiAdminActions = setupAdminActions({
   client, guildId: CONFIG.guildId,
   adminIds: String(process.env.AI_ADMIN_USER_IDS || '').split(',').map(x => x.trim()).filter(Boolean),
   callModel: requestAiChatCompletion,
+  getBillyAdminRoleId: () => String(state.aiAssistant?.billyAdminRoleId || ''),
 });
 
 const inviteSnapshot = new Map();
@@ -851,8 +853,115 @@ const commands = [
   return json;
 });
 
+
+async function ensureBillyAdminRole(guild) {
+  if (!guild) throw new Error('Configured guild is unavailable.');
+  state.aiAssistant ||= {};
+  const aiState = state.aiAssistant;
+
+  await guild.roles.fetch().catch(() => null);
+  let role = aiState.billyAdminRoleId
+    ? (guild.roles.cache.get(String(aiState.billyAdminRoleId)) || await guild.roles.fetch(String(aiState.billyAdminRoleId)).catch(() => null))
+    : null;
+
+  let created = false;
+  if (!role) {
+    // If persistent state was reset but the marker role survived, adopt the
+    // existing exact role rather than making duplicates.
+    role = guild.roles.cache.find(r => !r.managed && r.name === BILLY_ADMIN_ROLE_NAME) || null;
+  }
+
+  if (!role) {
+    const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+    if (!me?.permissions?.has(PermissionFlagsBits.ManageRoles)) {
+      throw new Error(`Billy needs Manage Roles to create the ${BILLY_ADMIN_ROLE_NAME} marker role.`);
+    }
+    role = await guild.roles.create({
+      name: BILLY_ADMIN_ROLE_NAME,
+      permissions: [],
+      reason: 'Billy AI administrator marker role (no Discord Administrator permission)',
+    });
+    created = true;
+    // A recreated role needs the one-time migration again because the old role
+    // membership disappeared when Discord deleted the old role.
+    aiState.billyAdminBootstrapDone = false;
+  }
+
+  if (String(aiState.billyAdminRoleId || '') !== role.id) {
+    aiState.billyAdminRoleId = role.id;
+    saveState();
+  }
+
+  const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+  if (!me?.permissions?.has(PermissionFlagsBits.ManageRoles)) {
+    console.warn(`[BILLY ADMIN] Role ${role.name} exists (${role.id}), but Billy lacks Manage Roles so it cannot auto-assign it.`);
+    return role;
+  }
+  if (role.managed || role.position >= me.roles.highest.position) {
+    console.warn(`[BILLY ADMIN] Put Billy's bot role above ${role.name}; Discord currently blocks Billy from assigning it.`);
+    return role;
+  }
+
+  const configuredIds = String(process.env.AI_ADMIN_USER_IDS || '').split(',').map(v => v.trim()).filter(v => /^\d{16,22}$/.test(v));
+  const bootstrapIds = new Set([String(guild.ownerId || ''), ...configuredIds].filter(Boolean));
+  const shouldLegacyBootstrap = created || !aiState.billyAdminBootstrapDone;
+
+  // The first migration intentionally discovers existing administrators once.
+  // After that, Billy Admin itself is the stable authority and role names are
+  // no longer consulted for authorization.
+  if (shouldLegacyBootstrap) {
+    await guild.members.fetch().catch(error => console.warn('[BILLY ADMIN] Could not fetch all members for first-time bootstrap:', error?.message || error));
+    for (const member of guild.members.cache.values()) {
+      if (member.user?.bot) continue;
+      const realAdmin = member.permissions?.has(PermissionFlagsBits.Administrator) || member.permissions?.has(PermissionFlagsBits.ManageGuild);
+      const legacyAdminName = member.roles?.cache?.some(role => /^(?:Admin|Administrator)$/i.test(role.name.trim()));
+      if (realAdmin || legacyAdminName) bootstrapIds.add(member.id);
+    }
+  }
+
+  let added = 0;
+  for (const userId of bootstrapIds) {
+    const member = guild.members.cache.get(userId) || await guild.members.fetch(userId).catch(() => null);
+    if (!member || member.user?.bot || member.roles.cache.has(role.id)) continue;
+    const ok = await member.roles.add(role, 'Billy AI admin bootstrap').then(() => true).catch(error => {
+      console.warn(`[BILLY ADMIN] Could not give ${role.name} to ${member.user?.tag || member.id}:`, error?.message || error);
+      return false;
+    });
+    if (ok) added += 1;
+  }
+
+  if (shouldLegacyBootstrap) {
+    aiState.billyAdminBootstrapDone = true;
+    saveState();
+  }
+  console.log(`[BILLY ADMIN] Ready: ${role.name} (${role.id}); auto-assigned to ${added} member(s) this startup.`);
+  return role;
+}
+
+client.on('roleDelete', async role => {
+  if (role.guild?.id !== CONFIG.guildId) return;
+  if (String(state.aiAssistant?.billyAdminRoleId || '') !== String(role.id)) return;
+  state.aiAssistant ||= {};
+  state.aiAssistant.billyAdminRoleId = null;
+  state.aiAssistant.billyAdminBootstrapDone = false;
+  saveState();
+  try {
+    const replacement = await ensureBillyAdminRole(role.guild);
+    console.log(`[BILLY ADMIN] Recreated deleted marker role as ${replacement.name} (${replacement.id}).`);
+  } catch (error) {
+    console.error('[BILLY ADMIN] Could not recreate deleted marker role:', error);
+  }
+});
+
 client.once('ready', async () => {
-  console.log(`[READY] Logged in as ${client.user.tag} | Billy admin/DM fix 2026-11-22-v2 | PvP removed`);
+  console.log(`[READY] Logged in as ${client.user.tag} | Billy admin role bootstrap 2026-11-22-v3 | PvP removed`);
+
+  try {
+    const guild = await client.guilds.fetch(CONFIG.guildId);
+    await ensureBillyAdminRole(guild);
+  } catch (error) {
+    console.error('[BILLY ADMIN] Automatic role setup failed:', error);
+  }
 
   // Resolve the exact GuildEmoji objects before any V2 panels are rebuilt.
   // This is what makes the ticket/giveaway/trophy render as the real custom
